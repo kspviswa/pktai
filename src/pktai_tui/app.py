@@ -5,8 +5,9 @@ from typing import Optional
 from textual.app import App, ComposeResult
 from textual import work
 from textual.reactive import reactive
+from textual.containers import Horizontal, Vertical, Container
 from textual_fspicker import FileOpen
-from textual.widgets import Header, Footer, Tree
+from textual.widgets import Header, Footer, Tree, Input, Button, Log, Static
 
 from .models import PacketRow
 from .ui import PacketList
@@ -26,14 +27,39 @@ SUPPORTED_EXTENSIONS = {".pcap", ".pcapng"}
 # Removed custom DetailsPane to use built-in Static widget instead
 
 
+class ChatPane(Container):
+    """Right-side chat pane: messages log and input box with send button.
+
+    Business logic will be added later; this currently provides only the view.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("Chat", id="chat_header")
+        yield Log(id="chat_log")
+        with Horizontal(id="chat_input_row"):
+            yield Input(placeholder="Type a message...", id="chat_input_box")
+            yield Button("Send", id="send_btn", variant="primary")
+
+
 class PktaiTUI(App):
     TITLE = "pktai 🤖"
     SUB_TITLE = "AI-assisted packet analysis in your terminal 💻"
     # Minimal CSS purely for layout sizing
     CSS = """
     Screen { layout: vertical; }
+    #body { layout: horizontal; height: 1fr; }
+    #left { width: 3fr; layout: vertical; }
+    #chat { width: 1fr; layout: vertical; border: round $primary; }
+
     PacketList { height: 1fr; overflow-y: auto; }
     #details { height: 1fr; overflow-y: auto; }
+
+    /* Chat pane layout */
+    #chat_header { dock: top; padding: 1 1; content-align: center middle; }
+    #chat_log { height: 1fr; overflow-y: auto; }
+    #chat_input_row { layout: horizontal; height: auto; padding: 1; }
+    #chat_input_box { width: 1fr; }
+    #send_btn { width: 12; margin-left: 1; }
     """
 
     BINDINGS = [
@@ -45,11 +71,15 @@ class PktaiTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield PacketList(id="packets")
-        # Use a Tree for expandable, per-layer details
-        tree = Tree("Packet details")
-        tree.id = "details"
-        yield tree
+        # Body: horizontal split between left (packets + details) and right (chat)
+        with Horizontal(id="body"):
+            with Vertical(id="left"):
+                yield PacketList(id="packets")
+                # Use a Tree for expandable, per-layer details
+                tree = Tree("Packet details")
+                tree.id = "details"
+                yield tree
+            yield ChatPane(id="chat")
         yield Footer()
 
     def on_mount(self) -> None:
