@@ -8,7 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "textual>=0.52.0",
+  "textual>=0.70.0",
   "pyshark>=0.6.0",
   "textual-fspicker>=0.4.0"
 ]

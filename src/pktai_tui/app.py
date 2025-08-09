@@ -74,11 +74,13 @@ class PacketList(Vertical):
 
 
 class PktaiTUI(App):
+    TITLE = "pktai 🤖"
+    SUB_TITLE = "AI-assisted packet analysis in your terminal 💻"
     # Minimal CSS purely for layout sizing
     CSS = """
     Screen { layout: vertical; }
-    PacketList { height: 1fr; }
-    #details { height: 3; }
+    PacketList { height: 1fr; overflow-y: auto; }
+    #details { height: 1fr; overflow-y: auto; }
     """
 
     BINDINGS = [
