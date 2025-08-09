@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 from textual import work
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
-from textual.widgets import Header, Footer, Button, Label, DataTable
+from textual.widgets import Header, Footer, Label, DataTable, Static
 from textual_fspicker import FileOpen
 
 # PyShark imports
@@ -31,42 +31,23 @@ class PacketRow:
     info: str
 
 
-class TitleBar(Container):
-    """A simple title bar with a File menu button."""
-
-    def compose(self) -> ComposeResult:
-        yield Container(
-            Button("File", id="btn-file"),
-            Label("pktai TUI", id="title"),
-            id="titlebar-row",
-        )
-
-    DEFAULT_CSS = """
-    TitleBar #titlebar-row {
-        height: 3;
-        dock: top;
-        layout: horizontal;
-        padding: 0 1;
-    }
-    TitleBar #title {
-        content-align: center middle;
-        width: 1fr;
-    }
-    """
+# Removed TitleBar; using only Header for top chrome
 
 
 class PacketList(Vertical):
     """Top-pane style list using DataTable to display packets."""
 
     table: DataTable
+    # map row key -> ethernet details string
+    details_by_key: dict[object, str]
 
     def compose(self) -> ComposeResult:
         self.table = DataTable(zebra_stripes=True)
         self.table.add_columns("No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
         yield self.table
 
-    def add_packet(self, row: PacketRow) -> None:
-        self.table.add_row(
+    def add_packet(self, row: PacketRow, eth_details: str | None = None) -> None:
+        key = self.table.add_row(
             str(row.no),
             row.time,
             row.src,
@@ -74,17 +55,30 @@ class PacketList(Vertical):
             row.proto,
             str(row.length),
             row.info,
+            key=row.no,
         )
+        if not hasattr(self, "details_by_key"):
+            self.details_by_key = {}
+        if eth_details:
+            self.details_by_key[key] = eth_details
 
     def clear(self) -> None:
         self.table.clear()
+        self.details_by_key = {}
+
+    def get_details_for_key(self, key: object) -> str | None:
+        return getattr(self, "details_by_key", {}).get(key)
+
+
+# Removed custom DetailsPane to use built-in Static widget instead
 
 
 class PktaiTUI(App):
+    # Minimal CSS purely for layout sizing
     CSS = """
-    Screen {
-        layout: vertical;
-    }
+    Screen { layout: vertical; }
+    PacketList { height: 1fr; }
+    #details { height: 3; }
     """
 
     BINDINGS = [
@@ -96,12 +90,13 @@ class PktaiTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield TitleBar()
-        yield PacketList()
+        yield PacketList(id="packets")
+        yield Static("Packet details will appear here when you highlight a row.", id="details")
         yield Footer()
 
     def on_mount(self) -> None:
         self.packet_list = self.query_one(PacketList)
+        self.details_pane = self.query_one("#details", Static)
 
     @work
     async def action_open_capture(self) -> None:
@@ -114,9 +109,7 @@ class PktaiTUI(App):
             return
         await self.load_capture(selected)
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-file":
-            await self.action_open_capture()
+    # File button removed; open with 'o' binding only
 
     async def load_capture(self, path: Path) -> None:
         if pyshark is None:
@@ -131,6 +124,8 @@ class PktaiTUI(App):
 
         self.capture_path = path
         self.packet_list.clear()
+        # Clear details pane
+        self.details_pane.update("Packet details will appear here when you highlight a row.")
         # Run parsing in a background worker thread to avoid blocking UI
         self.parse_packets(path)
 
@@ -183,12 +178,47 @@ class PktaiTUI(App):
                     pass
 
                 row = PacketRow(no=no, time=time_str, src=src, dst=dst, proto=proto, length=length, info=info)
-                self.call_from_thread(self.packet_list.add_packet, row)
+
+                # Build Ethernet details text if Ethernet layer present
+                eth_details: str | None = None
+                try:
+                    if hasattr(packet, "eth"):
+                        eth_src = safe_attr(packet.eth, "src")
+                        eth_dst = safe_attr(packet.eth, "dst")
+                        eth_type = safe_attr(packet.eth, "type")
+                        eth_len = safe_attr(packet.eth, "len")
+                        lines = [
+                            f"Ethernet II",
+                            f"  Source: {eth_src}",
+                            f"  Destination: {eth_dst}",
+                            f"  Type: {eth_type}",
+                        ]
+                        if eth_len:
+                            lines.append(f"  Length: {eth_len}")
+                        eth_details = "\n".join(lines)
+                except Exception:
+                    pass
+
+                self.call_from_thread(self.packet_list.add_packet, row, eth_details)
         finally:
             try:
                 cap.close()
             except Exception:
                 pass
+
+    def _update_details_from_key(self, key: object) -> None:
+        details = self.packet_list.get_details_for_key(key)
+        if details:
+            self.details_pane.update(details)
+        else:
+            self.details_pane.update("(No Ethernet details for this packet)")
+
+    # Update on highlight and on explicit selection
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:  # type: ignore[override]
+        self._update_details_from_key(event.row_key)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:  # type: ignore[override]
+        self._update_details_from_key(event.row_key)
 
 
 def main() -> None:
