@@ -93,7 +93,7 @@ class ChatPane(Container):
     def _clear_chat(self) -> None:
         self._messages = []
         self.chat_log.clear()
-        self.chat_log.write_line("(New chat started)")
+        self.chat_log.write("(New chat started)")
         self.chat_input.value = ""
         self.chat_input.focus()
 
