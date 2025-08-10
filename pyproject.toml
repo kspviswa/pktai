@@ -1,9 +1,9 @@
 [project]
-name = "pktai-tui"
+name = "pktai"
 version = "0.1.0"
 description = "AI-assisted packet analysis in your terminal 🚀🤖📦💻"
 authors = [
-  { name = "pktai" }
+  { name = "Viswa Kumar" }
 ]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,11 +12,20 @@ dependencies = [
   "pyshark>=0.6.0",
   "textual-fspicker>=0.4.0",
   "openai>=1.30.0",
-  "pytest>=8.4.1",
 ]
+license = { file = "LICENSE" }
+
+[project.urls]
+Homepage = "https://github.com/kspviswa/pktai"
+Repository = "https://github.com/kspviswa/pktai"
 
 [project.scripts]
 pktai = "pktai_tui.app:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.1",
+]
 
 [build-system]
 requires = ["hatchling"]
