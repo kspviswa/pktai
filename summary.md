@@ -189,3 +189,27 @@
 - Optional persistence: write overrides to a config file to survive restarts.
 - Streaming responses could improve perceived latency; add streaming support in `LLMService` and UI.
 - Consider exposing nucleus/top-k and presence/frequency penalties if backend supports them.
+
+## Agentic Orchestrator & Sub-Agents (2025-08-10)
+
+- Added an in-repo orchestrator that routes chat input between Chat, Packet, and Packet Filter agents. NL display-filter requests immediately update the packets pane.
+
+### What Changed
+- `src/pktai_tui/services/agents.py`
+  - Implemented `Orchestrator.route()` with filter-first heuristic; accepts a filter only if it parses via our `Lexer`/`Parser` (prevents misrouting packet questions).
+  - Implemented `ChatAgent`, `PacketAgent`, `PacketFilterAgent` with output sanitation (removes `<think>` and code fences).
+  - `PacketFilterAgent.is_valid_display_filter()` to validate LLM-produced filters.
+- `src/pktai_tui/app.py`
+  - `ChatPane` now calls the orchestrator; on `mode == "filter"`, calls `apply_display_filter()` and echoes: `Applied display filter: <filter>`.
+  - Added `PktaiTUI.get_raw_packets()` accessor used by the orchestrator flow.
+- `src/pktai_tui/services/capture.py`
+  - Added `packets_to_text(packets, max_packets, max_chars)` to build a compact textual dump of the capture for the Packet Agent context.
+
+### Usage
+- NL filter: "get me all NGAP packets" → applies `ngap` and the packets pane reflects filtered results; chat shows a short confirmation.
+- Packet analysis: "What can you tell me about this packet capture?" → routes to Packet Agent and answers based on the current capture context.
+
+### Notes / Follow-ups
+- Tune classification prompts and sampling of packet dump for very large captures.
+- Add unit tests for `packets_to_text()` and filter validation edge cases.
+- Consider showing the active display filter in the UI status area.
