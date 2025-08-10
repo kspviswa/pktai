@@ -5,10 +5,12 @@ from typing import Optional
 from textual.app import App, ComposeResult
 from textual import work
 from textual.reactive import reactive
-from textual.containers import Horizontal, Vertical, Container
+from textual.containers import Horizontal, Vertical, Container, VerticalScroll
 from textual_fspicker import FileOpen
-from textual.widgets import Header, Footer, Tree, Input, Button, RichLog, Static
+from textual.widgets import Header, Footer, Tree, Input, Button, Static, LoadingIndicator, DataTable
 import os
+import textwrap
+from rich.text import Text
 from openai import AsyncOpenAI
 
 from .models import PacketRow
@@ -38,8 +40,10 @@ class ChatPane(Container):
     def compose(self) -> ComposeResult:
         # Header
         yield Static("Chat", id="chat_header")
-        # Chat log fills available space with soft wrapping
-        yield RichLog(id="chat_log", wrap=True, auto_scroll=True)
+        # Scrollable message list
+        with VerticalScroll(id="chat_log"):
+            # Messages will be appended programmatically as containers
+            pass
         # Input row
         with Horizontal(id="chat_input_row"):
             yield Input(placeholder="Type a message...", id="chat_input_box")
@@ -51,29 +55,69 @@ class ChatPane(Container):
         # Chat state
         self._messages: list[dict[str, str]] = []  # role: user/assistant, content: text
         # Widgets
-        self.chat_log = self.query_one("#chat_log", RichLog)
+        self.chat_log = self.query_one("#chat_log", VerticalScroll)
         self.chat_input = self.query_one("#chat_input_box", Input)
         self.send_button = self.query_one("#send_btn", Button)
         self.new_chat_button = self.query_one("#new_chat_btn", Button)
+        # Pending assistant message placeholder refs
+        self._pending: dict[str, object] | None = None
         # LLM client
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         api_key = os.getenv("OPENAI_API_KEY", "ollama")  # Ollama ignores but required by client
         self.llm = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
-    def _append_to_log(self, role: str, text: str) -> None:
-        prefix = "You" if role == "user" else "LLM"
-        # RichLog will handle soft wrapping based on available width
-        # Preserve existing newlines in the message
-        lines = text.splitlines() or [""]
-        for line in lines:
-            self.chat_log.write(f"[{prefix}] {line}")
+    def _make_avatar(self, role: str) -> Static:
+        emoji = "👤" if role == "user" else "🤖"
+        return Static(emoji, classes=f"avatar {role}")
+
+    def _append_message(self, role: str, content: str) -> None:
+        # Container per message: Horizontal(avatar | bubble)
+        row = Horizontal(classes=f"msg {role}")
+        # Mount row first before mounting children to avoid MountError
+        self.chat_log.mount(row)
+        try:
+            row.styles.height = "auto"
+            row.styles.margin = 0
+            row.styles.padding = 0
+        except Exception:
+            pass
+        # Avatar
+        row.mount(self._make_avatar(role))
+        # Bubble container for message content
+        bubble = Vertical(classes=f"bubble {role}")
+        row.mount(bubble)
+        try:
+            bubble.styles.height = "auto"
+            bubble.styles.margin = 0
+            bubble.styles.padding = 1
+        except Exception:
+            pass
+
+        if role == "assistant":
+            self._populate_assistant_bubble(bubble, content)
+        else:
+            main_static = Static((content or "").strip(), classes="main")
+            bubble.mount(main_static)
+
+        # Auto-scroll to bottom
+        self.chat_log.scroll_end(animate=False)
 
     async def _send_and_get_reply(self, prompt: str) -> None:
         # Optimistic UI: show user message
-        self._append_to_log("user", prompt)
+        self._append_message("user", prompt)
         self._messages.append({"role": "user", "content": prompt})
         # Disable send while in-flight
         self.send_button.disabled = True
+        # Create inline pending assistant row with spinner, right after user message
+        pending_row = Horizontal(classes="msg assistant pending")
+        self.chat_log.mount(pending_row)
+        pending_row.mount(self._make_avatar("assistant"))
+        pending_bubble = Vertical(classes="bubble assistant")
+        pending_row.mount(pending_bubble)
+        spinner = LoadingIndicator(classes="inline_spinner")
+        pending_bubble.mount(spinner)
+        # Keep reference to replace later
+        self._pending = {"row": pending_row, "bubble": pending_bubble, "spinner": spinner}
         try:
             resp = await self.llm.chat.completions.create(
                 model=os.getenv("OLLAMA_MODEL", "qwen3:latest"),
@@ -84,20 +128,34 @@ class ChatPane(Container):
             if content is None:
                 content = "(no response)"
             self._messages.append({"role": "assistant", "content": content})
-            self._append_to_log("assistant", content)
+            # Remove pending row and create final assistant message
+            try:
+                if isinstance(self._pending, dict):
+                    pending_row = self._pending.get("row")
+                    if pending_row:
+                        pending_row.remove()
+                # Create final assistant message
+                self._append_message("assistant", content)
+            finally:
+                self._pending = None
         except Exception as e:
             self.app.notify(f"Chat error: {e}", severity="error")
         finally:
             self.send_button.disabled = False
+            pass
 
     def _clear_chat(self) -> None:
         self._messages = []
-        self.chat_log.clear()
-        self.chat_log.write("(New chat started)")
+        # Clear message widgets
+        for child in list(self.chat_log.children):
+            child.remove()
+        self.chat_log.mount(Static("(New chat started)", classes="system"))
+        self._pending = None
         self.chat_input.value = ""
         self.chat_input.focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:  # type: ignore[override]
+        # Handle chat send/new
         if event.button.id == "send_btn":
             text = (self.chat_input.value or "").strip()
             if not text:
@@ -108,6 +166,58 @@ class ChatPane(Container):
             self.chat_input.focus()
         elif event.button.id == "new_chat_btn":
             self._clear_chat()
+        # No per-button toggle now; reasoning is shown via Tree expander
+
+    def _populate_assistant_bubble(self, bubble: Vertical, content: str) -> None:
+        """Populate the given assistant bubble with main content and optional reasoning Tree."""
+        # Extract <think> block
+        think_text = None
+        start = content.find("<think>")
+        end = content.find("</think>")
+        if start != -1 and end != -1 and end > start:
+            think_text = content[start + len("<think>"):end].strip()
+            content = (content[:start] + content[end + len("</think>"):]).strip()
+
+        # Optional reasoning as collapsible Tree (shown above main content)
+        if think_text:
+            t = Tree("Thought process", classes="think_tree")
+            # Ensure the tree doesn't expand vertically
+            try:
+                t.styles.height = "auto"
+                t.styles.min_height = 0
+                t.styles.flex_grow = 0
+                t.styles.margin = 0
+                t.styles.padding = 0
+                t.show_guides = False
+            except Exception:
+                pass
+            # Add each line as a child node for readability
+            # Pre-wrap lines to avoid horizontal overflow since Tree labels don't soft-wrap reliably
+            wrapped: list[str] = []
+            for ln in think_text.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                wrapped.extend(textwrap.fill(ln, width=70).splitlines())
+            lines = wrapped or [think_text]
+            if not lines:
+                lines = [think_text]
+            for ln in lines:
+                renderable = Text(ln, no_wrap=False, overflow="fold")
+                node = t.root.add(renderable)
+                try:
+                    node.allow_expand = False
+                except Exception:
+                    pass
+            # Start collapsed by default to avoid reserving vertical space
+            try:
+                t.root.collapse()
+            except Exception:
+                pass
+            bubble.mount(t)
+
+        # Main content (below reasoning)
+        bubble.mount(Static((content or "").strip(), classes="main"))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:  # type: ignore[override]
         if event.input.id == "chat_input_box":
@@ -134,11 +244,25 @@ class PktaiTUI(App):
 
     /* Chat pane layout */
     #chat_header { dock: top; padding: 1 1; content-align: center middle; }
-    #chat_log { height: 1fr; overflow-y: auto; overflow-x: hidden; text-wrap: wrap; }
+    #chat_log { height: 1fr; overflow-y: auto; overflow-x: hidden; padding: 1; }
     #chat_input_row { layout: horizontal; height: auto; padding: 1; }
     #chat_input_box { width: 1fr; }
     #send_btn { width: 12; margin-left: 1; }
     #new_chat_btn { width: 1fr; padding: 0 1; margin: 0 1 1 1; }
+
+    /* Chat message styling */
+    .msg { layout: horizontal; padding: 0; margin: 0 0 1 0; height: auto; min-height: 0; }
+    .msg.user { content-align: left top; }
+    .msg.assistant { content-align: left top; }
+    .avatar { width: 3; min-width: 3; content-align: center middle; margin: 1 1 0 0; }
+    .avatar.user { color: $accent; }
+    .avatar.assistant { color: $secondary; }
+    .bubble { width: 1fr; layout: vertical; padding: 1; margin: 0; overflow-x: hidden; min-height: 0; }
+    .bubble .main { text-wrap: wrap; padding: 0; margin: 0; }
+    .think_tree { opacity: 0.6; width: 1fr; overflow-x: hidden; overflow-y: hidden; margin: 0 0 1 0; padding: 0; border: none; height: auto; min-height: 0; }
+    .inline_spinner { width: auto; height: auto; }
+    .system { text-style: italic; color: $text 70%; padding: 1; }
+    
     """
 
     BINDINGS = [
