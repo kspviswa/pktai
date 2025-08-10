@@ -131,3 +131,44 @@
 - Consider caching parsed ASTs for repeat filters to speed up toggling.
 - Provide a visible banner or status line showing the active display filter.
 - Add more operators over time (e.g., contains, ranges) with clear error messages for unsupported ones.
+
+## LLM Abstraction, Settings Modal, and Markdown Chat (2025-08-09)
+
+- Introduced a services-layer abstraction for the LLM and added a compact, modal Settings screen with model selection and generation controls. Enhanced the chat pane to render Markdown natively.
+
+### What Changed
+- `src/pktai_tui/services/llm.py`
+  - Added `LLMService` encapsulating OpenAI-compatible chat.
+  - `from_env()` reads `OLLAMA_BASE_URL`, `OPENAI_API_KEY`, `OLLAMA_MODEL`, and optional `LLM_TEMPERATURE`.
+  - `chat(messages, model, temperature, top_p, max_tokens, extra)` to support per-call overrides.
+  - `list_models()` to enumerate models from the Ollama/OpenAI-compatible server.
+- `src/pktai_tui/services/__init__.py`
+  - Exported `LLMService`.
+- `src/pktai_tui/app.py`
+  - `ChatPane` now uses `LLMService` instead of constructing `AsyncOpenAI` directly.
+  - Added Settings shortcut binding: `("s", "open_settings", "Settings")` and session-scoped overrides storage (`_llm_overrides`).
+  - LLM calls apply overrides if present.
+  - Chat messages now render Markdown:
+    - Uses `textual.widgets.Markdown` when available.
+    - Fallback to `Static` with `rich.markdown.Markdown` renderable.
+- `src/pktai_tui/ui/settings.py`
+  - New `SettingsScreen` as a centered `ModalScreen` (popover-style) with a slim dialog.
+  - Model dropdown populated via `LLMService.list_models()`; selects current or first available.
+  - Controls: temperature and top_p (sliders when available, else inputs), max_tokens and context_window inputs.
+  - Save dismisses the modal and persists overrides to the app; Cancel/Esc discards.
+  - Robustness:
+    - Handles environments without `textual.widgets.Slider` by falling back to inputs.
+    - Fixed duplicate ID issue by using `.row` class for section containers (no repeated IDs).
+- `src/pktai_tui/ui/__init__.py`
+  - Exported `SettingsScreen`.
+
+### Usage
+- Open Settings: press `s`.
+- Pick a model and adjust temperature/top_p (sliders or inputs), set max tokens/context window, then Save.
+- If Settings is never opened, env defaults are used (`OLLAMA_MODEL`, `LLM_TEMPERATURE`, etc.).
+- Chat supports Markdown formatting in both user and assistant messages.
+
+### Notes / Follow-ups
+- Optional persistence: write overrides to a config file to survive restarts.
+- Streaming responses could improve perceived latency; add streaming support in `LLMService` and UI.
+- Consider exposing nucleus/top-k and presence/frequency penalties if backend supports them.
