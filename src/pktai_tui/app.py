@@ -17,8 +17,10 @@ from rich.markdown import Markdown as RichMarkdown
 from .models import PacketRow
 from .ui import PacketList, SettingsScreen
 from .services.capture import parse_capture, build_packet_view
+from .services.capture import packets_to_text
 from .services.filtering import filter_packets, nl_to_display_filter
 from .services import LLMService
+from .services.agents import Orchestrator
 
 # PyShark imports
 try:
@@ -66,6 +68,8 @@ class ChatPane(Container):
         self._pending: dict[str, object] | None = None
         # LLM service abstraction
         self.llm_service = LLMService.from_env()
+        # Orchestrator for routing between chat/packet/filter
+        self.orchestrator = Orchestrator()
         # Current in-flight worker for LLM request (for cancellation)
         self._current_worker = None  # type: ignore[assignment]
 
@@ -295,8 +299,101 @@ class ChatPane(Container):
                 self.send_button.variant = "error"
             except Exception:
                 pass
-            worker = self.app.run_worker(self._send_and_get_reply(text))
+            worker = self.app.run_worker(self._send_via_orchestrator(text))
             self._current_worker = worker
+
+    async def _send_via_orchestrator(self, prompt: str) -> None:
+        """Send input through orchestrator to select an agent and handle reply/side-effects."""
+        # Optimistic UI: show user message
+        self._append_message("user", prompt)
+        self._messages.append({"role": "user", "content": prompt})
+        # Create pending assistant bubble with spinner
+        pending_row = Horizontal(classes="msg assistant pending")
+        self.chat_log.mount(pending_row)
+        pending_row.mount(self._make_avatar("assistant"))
+        pending_bubble = Vertical(classes="bubble assistant")
+        pending_row.mount(pending_bubble)
+        spinner = LoadingIndicator(classes="inline_spinner")
+        pending_bubble.mount(spinner)
+        self._pending = {"row": pending_row, "bubble": pending_bubble, "spinner": spinner}
+
+        try:
+            overrides = {}
+            try:
+                overrides = dict(self.app.get_llm_overrides())  # type: ignore[attr-defined]
+            except Exception:
+                overrides = {}
+
+            # Determine capture availability and prepare packet dump within budget
+            try:
+                raw_packets = list(self.app.get_raw_packets())  # type: ignore[attr-defined]
+            except Exception:
+                raw_packets = []
+            has_capture = bool(raw_packets)
+
+            # Derive char budget from context_window if provided
+            ctx = overrides.get("context_window") if isinstance(overrides, dict) else None
+            try:
+                ctx_tokens = int(ctx) if ctx is not None else 8192
+            except Exception:
+                ctx_tokens = 8192
+            # Rough 4 chars per token heuristic, reserve room for prompts/answer
+            max_chars = max(2000, int(ctx_tokens * 4 * 0.6))
+            packet_dump = packets_to_text(raw_packets, max_packets=200, max_chars=max_chars) if has_capture else ""
+
+            result = await self.orchestrator.route(
+                self.llm_service,
+                text=prompt,
+                history=self._messages,
+                overrides=overrides,
+                has_capture=has_capture,
+                packet_dump=packet_dump,
+            )
+
+            # Remove pending
+            try:
+                if isinstance(self._pending, dict):
+                    r = self._pending.get("row")
+                    if r:
+                        r.remove()
+            finally:
+                self._pending = None
+
+            mode = (result.get("mode") or "chat").lower()
+            if mode == "filter":
+                df = (result.get("filter") or "").strip()
+                if df:
+                    # Apply filter and echo
+                    self.app.apply_display_filter(df)
+                    self._append_message("assistant", f"Applied display filter: {df}")
+                else:
+                    self._append_message("assistant", "(No display filter derived)")
+                # Do not push assistant content to history for filter-only
+                return
+
+            # Chat or packet: show assistant content and store in history
+            content = str(result.get("text") or "(no response)")
+            self._messages.append({"role": "assistant", "content": content})
+            self._append_message("assistant", content)
+
+        except asyncio.CancelledError:
+            try:
+                if isinstance(self._pending, dict):
+                    r = self._pending.get("row")
+                    if r:
+                        r.remove()
+            finally:
+                self._pending = None
+            self.chat_log.mount(Static("(generation stopped)", classes="system"))
+        except Exception as e:
+            self.app.notify(f"Chat error: {e}", severity="error")
+        finally:
+            try:
+                self.send_button.label = "Send"
+                self.send_button.variant = "primary"
+            except Exception:
+                pass
+            self._current_worker = None
 
     def _handle_command(self, text: str) -> None:
         """Parse and execute slash commands. Currently supports:
@@ -553,6 +650,13 @@ class PktaiTUI(App):
     # --------- Accessors ---------
     def get_llm_overrides(self) -> dict[str, object]:
         return getattr(self, "_llm_overrides", {})
+
+    def get_raw_packets(self) -> list[object]:
+        """Return the in-memory list of raw pyshark packet objects (may be empty)."""
+        try:
+            return list(getattr(self, "_raw_packets", []) or [])
+        except Exception:
+            return []
 
 
 def main() -> None:

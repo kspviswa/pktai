@@ -307,3 +307,54 @@ def parse_capture(
             cap.close()
         except Exception:
             pass
+
+
+def packets_to_text(packets: list[object], *, max_packets: int = 200, max_chars: int = 50000) -> str:
+    """Produce a compact textual dump of packets for LLM context.
+
+    Uses `build_packet_view()` to keep formatting consistent with UI. Limits output
+    by number of packets and total characters to fit within the LLM context window.
+    """
+    lines: list[str] = []
+    if not packets:
+        return "(no packets loaded)"
+
+    count = 0
+    char_budget = max(2000, int(max_chars))
+
+    for idx, pkt in enumerate(packets, start=1):
+        if count >= max_packets:
+            break
+        try:
+            row, _details, _per_layer, _proto, per_layer_lines = build_packet_view(pkt, idx)
+        except Exception:
+            continue
+
+        # Header line similar to table: No, Time, Src -> Dst, Proto, Len, Info
+        header = f"#{row.no} {row.time} {row.src} -> {row.dst} [{row.proto}] len={row.length} | {row.info}"
+        chunk_lines = [header]
+
+        # Include the first line of key layers to stay compact
+        order = ["FRAME", "SLL", "ETH", "IP", "IPv6", "TCP", "UDP", "DATA"]
+        for name in order:
+            try:
+                lns = per_layer_lines.get(name, [])  # type: ignore[union-attr]
+                if lns:
+                    chunk_lines.append(lns[0])
+            except Exception:
+                continue
+
+        # Append chunk if budget allows
+        chunk_text = "\n".join(chunk_lines)
+        # +1 for the extra newline between packets
+        if (sum(len(x) for x in lines) + len(chunk_text) + 1) > char_budget:
+            break
+        lines.append(chunk_text)
+        lines.append("")
+        count += 1
+
+    # If truncated, note it
+    if count < len(packets):
+        lines.append(f"(truncated: showed {count} of {len(packets)} packets)")
+
+    return "\n".join(lines).strip()
