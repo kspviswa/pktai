@@ -11,12 +11,13 @@ from textual.widgets import Header, Footer, Tree, Input, Button, Static, Loading
 import os
 import textwrap
 from rich.text import Text
-from openai import AsyncOpenAI
+from rich.markdown import Markdown as RichMarkdown
 
 from .models import PacketRow
-from .ui import PacketList
+from .ui import PacketList, SettingsScreen
 from .services.capture import parse_capture, build_packet_view
 from .services.filtering import filter_packets, nl_to_display_filter
+from .services import LLMService
 
 # PyShark imports
 try:
@@ -62,14 +63,30 @@ class ChatPane(Container):
         self.new_chat_button = self.query_one("#new_chat_btn", Button)
         # Pending assistant message placeholder refs
         self._pending: dict[str, object] | None = None
-        # LLM client
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        api_key = os.getenv("OPENAI_API_KEY", "ollama")  # Ollama ignores but required by client
-        self.llm = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # LLM service abstraction
+        self.llm_service = LLMService.from_env()
 
     def _make_avatar(self, role: str) -> Static:
         emoji = "👤" if role == "user" else "🤖"
         return Static(emoji, classes=f"avatar {role}")
+
+    def _mount_markdown(self, parent: Container, content: str, classes: str = "main") -> None:
+        """Render markdown content using native Textual widget if available; fallback to Static with Rich Markdown renderable."""
+        # Try Textual Markdown widget
+        md_widget = None
+        try:
+            from textual.widgets import Markdown as MarkdownWidget  # type: ignore
+            md_widget = MarkdownWidget((content or "").strip())
+            if classes:
+                md_widget.classes = classes
+            parent.mount(md_widget)
+            return
+        except Exception:
+            md_widget = None
+        # Fallback: Static with rich.markdown.Markdown renderable
+        renderable = RichMarkdown((content or "").strip())
+        node = Static(renderable, classes=classes or "main")
+        parent.mount(node)
 
     def _append_message(self, role: str, content: str) -> None:
         # Container per message: Horizontal(avatar | bubble)
@@ -97,8 +114,7 @@ class ChatPane(Container):
         if role == "assistant":
             self._populate_assistant_bubble(bubble, content)
         else:
-            main_static = Static((content or "").strip(), classes="main")
-            bubble.mount(main_static)
+            self._mount_markdown(bubble, content, classes="main")
 
         # Auto-scroll to bottom
         self.chat_log.scroll_end(animate=False)
@@ -120,14 +136,19 @@ class ChatPane(Container):
         # Keep reference to replace later
         self._pending = {"row": pending_row, "bubble": pending_bubble, "spinner": spinner}
         try:
-            resp = await self.llm.chat.completions.create(
-                model=os.getenv("OLLAMA_MODEL", "qwen3:latest"),
-                messages=self._messages,
-                temperature=0.2,
+            # Apply overrides from Settings, if any
+            overrides = {}
+            try:
+                overrides = dict(self.app.get_llm_overrides())  # type: ignore[attr-defined]
+            except Exception:
+                overrides = {}
+            content = await self.llm_service.chat(
+                self._messages,
+                model=overrides.get("model"),
+                temperature=overrides.get("temperature"),
+                top_p=overrides.get("top_p"),
+                max_tokens=overrides.get("max_tokens"),
             )
-            content = resp.choices[0].message.content if resp.choices else "(no response)"
-            if content is None:
-                content = "(no response)"
             self._messages.append({"role": "assistant", "content": content})
             # Remove pending row and create final assistant message
             try:
@@ -217,8 +238,8 @@ class ChatPane(Container):
                 pass
             bubble.mount(t)
 
-        # Main content (below reasoning)
-        bubble.mount(Static((content or "").strip(), classes="main"))
+        # Main content (below reasoning), render as Markdown
+        self._mount_markdown(bubble, content, classes="main")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:  # type: ignore[override]
         if event.input.id == "chat_input_box":
@@ -302,6 +323,7 @@ class PktaiTUI(App):
 
     BINDINGS = [
         ("o", "open_capture", "Open"),
+        ("s", "open_settings", "Settings"),
         ("q", "quit", "Quit"),
     ]
 
@@ -325,6 +347,8 @@ class PktaiTUI(App):
         self.details_tree = self.query_one("#details", Tree)
         # Store raw pyshark packet objects to allow in-memory filtering
         self._raw_packets: list[object] = []
+        # LLM overrides saved from Settings screen
+        self._llm_overrides: dict[str, object] = {}
 
     @work
     async def action_open_capture(self) -> None:
@@ -336,6 +360,15 @@ class PktaiTUI(App):
             self.notify(f"Unsupported file type: {selected.suffix}", severity="error")
             return
         await self.load_capture(selected)
+
+    @work
+    async def action_open_settings(self) -> None:
+        """Open the LLM settings screen and save overrides if provided."""
+        result = await self.push_screen_wait(SettingsScreen(current=self._llm_overrides))
+        if result:
+            # Save overrides and notify
+            self._llm_overrides = dict(result)
+            self.notify("LLM settings saved.", severity="information")
 
     # File button removed; open with 'o' binding only
 
@@ -477,6 +510,10 @@ class PktaiTUI(App):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:  # type: ignore[override]
         self._update_details_from_key(event.row_key)
+
+    # --------- Accessors ---------
+    def get_llm_overrides(self) -> dict[str, object]:
+        return getattr(self, "_llm_overrides", {})
 
 
 def main() -> None:
