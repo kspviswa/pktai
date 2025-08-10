@@ -10,6 +10,7 @@ from textual_fspicker import FileOpen
 from textual.widgets import Header, Footer, Tree, Input, Button, Static, LoadingIndicator, DataTable
 import os
 import textwrap
+import asyncio
 from rich.text import Text
 from rich.markdown import Markdown as RichMarkdown
 
@@ -65,6 +66,8 @@ class ChatPane(Container):
         self._pending: dict[str, object] | None = None
         # LLM service abstraction
         self.llm_service = LLMService.from_env()
+        # Current in-flight worker for LLM request (for cancellation)
+        self._current_worker = None  # type: ignore[assignment]
 
     def _make_avatar(self, role: str) -> Static:
         emoji = "👤" if role == "user" else "🤖"
@@ -123,8 +126,12 @@ class ChatPane(Container):
         # Optimistic UI: show user message
         self._append_message("user", prompt)
         self._messages.append({"role": "user", "content": prompt})
-        # Disable send while in-flight
-        self.send_button.disabled = True
+        # Toggle button to STOP state (keep enabled to allow cancel)
+        try:
+            self.send_button.label = "Stop"
+            self.send_button.variant = "error"
+        except Exception:
+            pass
         # Create inline pending assistant row with spinner, right after user message
         pending_row = Horizontal(classes="msg assistant pending")
         self.chat_log.mount(pending_row)
@@ -160,10 +167,27 @@ class ChatPane(Container):
                 self._append_message("assistant", content)
             finally:
                 self._pending = None
+        except asyncio.CancelledError:
+            # Cancelled by user; remove pending row and echo system notice
+            try:
+                if isinstance(self._pending, dict):
+                    pending_row = self._pending.get("row")
+                    if pending_row:
+                        pending_row.remove()
+            finally:
+                self._pending = None
+            self.chat_log.mount(Static("(generation stopped)", classes="system"))
         except Exception as e:
             self.app.notify(f"Chat error: {e}", severity="error")
         finally:
-            self.send_button.disabled = False
+            # Restore Send button appearance
+            try:
+                self.send_button.label = "Send"
+                self.send_button.variant = "primary"
+            except Exception:
+                pass
+            # Clear current worker ref
+            self._current_worker = None
             pass
 
     def _clear_chat(self) -> None:
@@ -179,6 +203,14 @@ class ChatPane(Container):
     def on_button_pressed(self, event: Button.Pressed) -> None:  # type: ignore[override]
         # Handle chat send/new
         if event.button.id == "send_btn":
+            # If a worker is running, treat as STOP
+            if self._current_worker and getattr(self._current_worker, "is_running", False):
+                try:
+                    self._current_worker.cancel()
+                except Exception:
+                    pass
+                return
+            # Otherwise, normal SEND flow
             text = (self.chat_input.value or "").strip()
             if not text:
                 return
@@ -257,7 +289,14 @@ class ChatPane(Container):
             self._handle_command(text)
         else:
             # Fire and forget async call
-            self.app.run_worker(self._send_and_get_reply(text))
+            # Toggle button to STOP now
+            try:
+                self.send_button.label = "Stop"
+                self.send_button.variant = "error"
+            except Exception:
+                pass
+            worker = self.app.run_worker(self._send_and_get_reply(text))
+            self._current_worker = worker
 
     def _handle_command(self, text: str) -> None:
         """Parse and execute slash commands. Currently supports:

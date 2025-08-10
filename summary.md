@@ -1,3 +1,20 @@
+### Chat Stop/Cancel Button (2025-08-10)
+
+- Added interrupt support for in-flight LLM responses in the Chat pane.
+
+#### What Changed
+- `src/pktai_tui/app.py`
+  - When a prompt is sent, the blue "Send" button toggles to a red "Stop" button.
+  - Pressing "Stop" cancels the in-flight background worker running the LLM call.
+  - On cancel, the pending spinner row is removed and a system line "(generation stopped)" is appended.
+  - After completion or cancellation, the button reverts back to blue "Send".
+  - Internals: stores the worker handle (`self._current_worker`) and catches `asyncio.CancelledError` to clean up UI state.
+
+#### Usage
+- Type a prompt and press Send; to interrupt, press Stop.
+
+#### Notes / Follow-ups
+- Streaming plus partial rendering would pair well with Stop for better UX; we can add token-level streaming next.
 # pktai-tui Summary
 
 - TL;DR: Added a right-side, dynamically wrapping Chat pane powered by an Ollama-backed LLM (via OpenAI client), with Send/Enter-to-send and New Chat, while preserving the packets + details workflow.
