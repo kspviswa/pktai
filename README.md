@@ -10,6 +10,8 @@ Project URL: https://github.com/kspviswa/pktai
 
 ![](pktai_screen.png)
 
+### Demo : https://www.youtube.com/watch?v=GnPRs-cBtQM 
+
 ## Highlights
 
 - **Packet-first UI**: Left pane shows packets and expandable per-layer details.
