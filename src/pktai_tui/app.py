@@ -15,7 +15,8 @@ from openai import AsyncOpenAI
 
 from .models import PacketRow
 from .ui import PacketList
-from .services.capture import parse_capture
+from .services.capture import parse_capture, build_packet_view
+from .services.filtering import filter_packets, nl_to_display_filter
 
 # PyShark imports
 try:
@@ -160,8 +161,8 @@ class ChatPane(Container):
             text = (self.chat_input.value or "").strip()
             if not text:
                 return
-            # Fire and forget async call
-            self.app.run_worker(self._send_and_get_reply(text))
+            # Route via unified handler to support slash-commands
+            self._handle_submit(text)
             self.chat_input.value = ""
             self.chat_input.focus()
         elif event.button.id == "new_chat_btn":
@@ -224,9 +225,43 @@ class ChatPane(Container):
             text = (event.value or "").strip()
             if not text:
                 return
-            self.app.run_worker(self._send_and_get_reply(text))
+            self._handle_submit(text)
             self.chat_input.value = ""
             self.chat_input.focus()
+
+    # -------------------- Slash command routing --------------------
+    def _handle_submit(self, text: str) -> None:
+        """Route chat input to command handler or LLM depending on prefix."""
+        if text.startswith("/"):
+            self._handle_command(text)
+        else:
+            # Fire and forget async call
+            self.app.run_worker(self._send_and_get_reply(text))
+
+    def _handle_command(self, text: str) -> None:
+        """Parse and execute slash commands. Currently supports:
+        - /df <display_filter>
+        """
+        parts = text[1:].strip().split(maxsplit=1)
+        if not parts:
+            self.app.notify("Empty command.", severity="warning")
+            return
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        if cmd == "df":
+            df = arg.strip()
+            if not df:
+                self.app.notify("Usage: /df <display_filter>", severity="warning")
+                return
+            # Execute filter against currently loaded packets
+            self.app.apply_display_filter(df)
+            # Echo action in chat for traceability
+            self._append_message("assistant", f"Applied display filter: {df}")
+            return
+
+        # Unknown command
+        self.app.notify(f"Unknown command: /{cmd}", severity="warning")
 
 
 class PktaiTUI(App):
@@ -288,6 +323,8 @@ class PktaiTUI(App):
     def on_mount(self) -> None:
         self.packet_list = self.query_one(PacketList)
         self.details_tree = self.query_one("#details", Tree)
+        # Store raw pyshark packet objects to allow in-memory filtering
+        self._raw_packets: list[object] = []
 
     @work
     async def action_open_capture(self) -> None:
@@ -327,8 +364,58 @@ class PktaiTUI(App):
         """Parse packets and feed the table incrementally (background thread)."""
         def emit(row: PacketRow, details: str | None, per_layer: dict[str, str], proto: str | None, per_layer_lines: dict[str, list[str]]) -> None:
             self.call_from_thread(self.packet_list.add_packet, row, details, per_layer, proto, per_layer_lines)
+        # Reset store
+        self._raw_packets = []
+        parse_capture(
+            path,
+            emit,
+            notify_error=lambda msg: self.call_from_thread(self.notify, msg, severity="error"),
+            on_packet_obj=lambda pkt: self._raw_packets.append(pkt),
+        )
 
-        parse_capture(path, emit, notify_error=lambda msg: self.call_from_thread(self.notify, msg, severity="error"))
+    # -------------------- Filtering workflow (LLM-callable) --------------------
+    def rebuild_from_packets(self, packets: list[object]) -> None:
+        """Rebuild PacketList and details from given pyshark packets (UI thread)."""
+        # Clear existing
+        self.packet_list.clear()
+        self.details_tree.clear()
+        self.details_tree.root.label = "Packet details"
+        self.details_tree.root.expand()
+        # Rebuild rows
+        for idx, pkt in enumerate(packets, start=1):
+            try:
+                row, details, per_layer, proto, per_layer_lines = build_packet_view(pkt, idx)
+                self.packet_list.add_packet(row, details, per_layer, proto, per_layer_lines)
+            except Exception:
+                continue
+
+    def apply_display_filter(self, display_filter: str) -> None:
+        """Apply a Wireshark-like display filter to currently loaded packets and refresh UI.
+
+        Intended to be called by the LLM tool layer passing `display_filter`.
+        """
+        if not getattr(self, "_raw_packets", None):
+            self.notify("No capture loaded to filter.", severity="warning")
+            return
+        try:
+            filtered = filter_packets(self._raw_packets, display_filter)
+        except NotImplementedError as e:
+            self.notify(f"Unsupported filter: {e}", severity="error")
+            return
+        except ValueError as e:
+            self.notify(f"Invalid filter: {e}", severity="error")
+            return
+        # Rebuild UI from filtered set
+        self.rebuild_from_packets(filtered)
+
+    def apply_nl_query(self, nl_query: str) -> str:
+        """Convert a natural-language query to display_filter and apply it.
+
+        Returns the derived display_filter string for transparency.
+        """
+        df = nl_to_display_filter(nl_query)
+        self.apply_display_filter(df)
+        return df
 
     def _update_details_from_key(self, key: object) -> None:
         # Render details into the Tree widget with expandable per-layer sections

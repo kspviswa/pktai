@@ -11,7 +11,8 @@ dependencies = [
   "textual>=0.70.0",
   "pyshark>=0.6.0",
   "textual-fspicker>=0.4.0",
-  "openai>=1.30.0"
+  "openai>=1.30.0",
+  "pytest>=8.4.1",
 ]
 
 [project.scripts]
