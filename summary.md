@@ -89,3 +89,45 @@
 ### Notes / Follow-ups
 - Optional polish: rounded chat bubbles and subtle background color for messages.
 - Potential keyboard shortcuts for expanding/collapsing the reasoning tree.
+
+## In-memory Filtering & Slash Commands (2025-08-09)
+
+- Added Wireshark-like in-memory filtering module and integrated it into services and app flow.
+
+### What Changed
+- `src/pktai_tui/services/filtering.py`
+  - Wireshark-like display filter subset with tokenizer, parser, evaluator.
+  - Exports: `filter_packets(packets, display_filter)`, `nl_to_display_filter(nl_query)`.
+- `src/pktai_tui/services/capture.py`
+  - Extracted `build_packet_view(packet, index)` for reuse when rebuilding UI from filtered packets.
+  - `parse_capture(..., on_packet_obj=...)` collects raw pyshark packets during parse.
+- `src/pktai_tui/services/__init__.py`
+  - Re-exported `build_packet_view`, `filter_packets`, `nl_to_display_filter`.
+- `src/pktai_tui/app.py`
+  - Stores raw packets (`self._raw_packets`).
+  - New methods:
+    - `rebuild_from_packets(packets)` to repopulate UI from a given packet list.
+    - `apply_display_filter(display_filter)` to filter and refresh UI.
+    - `apply_nl_query(nl_query)` to convert NL → display filter and apply it.
+  - Chat input now supports slash-commands:
+    - `/df <display_filter>` applies display filter without invoking the LLM.
+    - Non-slash input continues to be sent to the LLM.
+- `src/pktai_tui/filtering.py`
+  - Backwards-compat shim that re-exports from `pktai_tui.services.filtering` with a deprecation note.
+- `tests/test_filtering.py`
+  - Updated imports to `from pktai_tui.services.filtering ...`.
+- `README.md`
+  - Updated examples to import from `pktai_tui.services.filtering` and demonstrate `nl_to_display_filter`.
+
+### Usage
+- From TUI chat input:
+  - `/df ngap && sctp.dstport == 38412`
+  - `/df ip.src == 10.0.0.1 && tcp`
+- Programmatically within the app:
+  - `self.apply_display_filter("ngap && sctp.dstport == 38412")`
+  - `self.apply_nl_query("get me all ngap packets with dst port 38412")`
+
+### Notes / Follow-ups
+- Consider caching parsed ASTs for repeat filters to speed up toggling.
+- Provide a visible banner or status line showing the active display filter.
+- Add more operators over time (e.g., contains, ranges) with clear error messages for unsupported ones.
