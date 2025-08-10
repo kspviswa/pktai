@@ -51,3 +51,41 @@
 - Introduced a right-side Chat pane with dynamic soft-wrapping, hooked to Ollama via OpenAI client, with Send/Enter submit and New Chat reset.
 - Refactored layout to a 75/25 split: left for packets/details, right for chat.
 - Updated dependencies and CSS to support the new UX.
+
+## Chat Pane Visual Enhancements (2025-08-09)
+
+- Added speaker avatars in chat
+  - User: `👤`; Assistant: `🤖` via `ChatPane._make_avatar()` and `.avatar` CSS class.
+  - Adjusted avatar sizing and alignment (`width: 3`, top margin `1`) to align with first text line.
+
+- Inline spinner during LLM processing
+  - Shows right after the user message.
+  - On response, the pending spinner row is removed and replaced with the final assistant message to avoid gaps.
+  - `.inline_spinner { width: auto; height: auto; }`.
+
+- Thought process (reasoning) expander
+  - Parses `<think>...</think>` and renders a collapsible `Tree` labeled “Thought process” above assistant text.
+  - Collapsed by default; constrained with `height: auto`, `min-height: 0`, `flex_grow: 0`, and hidden guides for compactness.
+  - Lines pre-wrapped (`textwrap.fill`) and rendered with `rich.text.Text(..., overflow="fold")` to avoid overflow.
+
+- Spacing and wrapping fixes
+  - Eliminated large vertical gaps by removing the extra pending row and constraining the reasoning tree.
+  - Tight but readable message spacing: `.msg { margin: 0 0 1 0; }`.
+  - Comfortable text padding: `.bubble { padding: 1; }` and runtime `bubble.styles.padding = 1`.
+  - Chat log gutter for breathing room: `#chat_log { padding: 1; }`.
+  - Ensured all containers use `height: auto; min-height: 0` and no unintended flex growth.
+
+- Message rendering structure
+  - Each message row is `Horizontal` with `avatar | bubble` and scrolls to end.
+  - Assistant bubble: reasoning tree (if present) above main text content.
+
+### Files Touched
+- `src/pktai_tui/app.py`
+  - `ChatPane._append_message()`
+  - `ChatPane._send_and_get_reply()`
+  - `ChatPane._populate_assistant_bubble()`
+  - Embedded CSS for `#chat_log`, `.msg`, `.avatar`, `.bubble`, `.think_tree`, `.inline_spinner`.
+
+### Notes / Follow-ups
+- Optional polish: rounded chat bubbles and subtle background color for messages.
+- Potential keyboard shortcuts for expanding/collapsing the reasoning tree.
