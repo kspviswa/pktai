@@ -7,7 +7,9 @@ from textual import work
 from textual.reactive import reactive
 from textual.containers import Horizontal, Vertical, Container
 from textual_fspicker import FileOpen
-from textual.widgets import Header, Footer, Tree, Input, Button, Log, Static
+from textual.widgets import Header, Footer, Tree, Input, Button, RichLog, Static
+import os
+from openai import AsyncOpenAI
 
 from .models import PacketRow
 from .ui import PacketList
@@ -34,11 +36,87 @@ class ChatPane(Container):
     """
 
     def compose(self) -> ComposeResult:
+        # Header
         yield Static("Chat", id="chat_header")
-        yield Log(id="chat_log")
+        # Chat log fills available space with soft wrapping
+        yield RichLog(id="chat_log", wrap=True, auto_scroll=True)
+        # Input row
         with Horizontal(id="chat_input_row"):
             yield Input(placeholder="Type a message...", id="chat_input_box")
             yield Button("Send", id="send_btn", variant="primary")
+        # New chat button below input row
+        yield Button("New Chat", id="new_chat_btn", variant="success")
+
+    def on_mount(self) -> None:
+        # Chat state
+        self._messages: list[dict[str, str]] = []  # role: user/assistant, content: text
+        # Widgets
+        self.chat_log = self.query_one("#chat_log", RichLog)
+        self.chat_input = self.query_one("#chat_input_box", Input)
+        self.send_button = self.query_one("#send_btn", Button)
+        self.new_chat_button = self.query_one("#new_chat_btn", Button)
+        # LLM client
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        api_key = os.getenv("OPENAI_API_KEY", "ollama")  # Ollama ignores but required by client
+        self.llm = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+    def _append_to_log(self, role: str, text: str) -> None:
+        prefix = "You" if role == "user" else "LLM"
+        # RichLog will handle soft wrapping based on available width
+        # Preserve existing newlines in the message
+        lines = text.splitlines() or [""]
+        for line in lines:
+            self.chat_log.write(f"[{prefix}] {line}")
+
+    async def _send_and_get_reply(self, prompt: str) -> None:
+        # Optimistic UI: show user message
+        self._append_to_log("user", prompt)
+        self._messages.append({"role": "user", "content": prompt})
+        # Disable send while in-flight
+        self.send_button.disabled = True
+        try:
+            resp = await self.llm.chat.completions.create(
+                model=os.getenv("OLLAMA_MODEL", "qwen3:latest"),
+                messages=self._messages,
+                temperature=0.2,
+            )
+            content = resp.choices[0].message.content if resp.choices else "(no response)"
+            if content is None:
+                content = "(no response)"
+            self._messages.append({"role": "assistant", "content": content})
+            self._append_to_log("assistant", content)
+        except Exception as e:
+            self.app.notify(f"Chat error: {e}", severity="error")
+        finally:
+            self.send_button.disabled = False
+
+    def _clear_chat(self) -> None:
+        self._messages = []
+        self.chat_log.clear()
+        self.chat_log.write_line("(New chat started)")
+        self.chat_input.value = ""
+        self.chat_input.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:  # type: ignore[override]
+        if event.button.id == "send_btn":
+            text = (self.chat_input.value or "").strip()
+            if not text:
+                return
+            # Fire and forget async call
+            self.app.run_worker(self._send_and_get_reply(text))
+            self.chat_input.value = ""
+            self.chat_input.focus()
+        elif event.button.id == "new_chat_btn":
+            self._clear_chat()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:  # type: ignore[override]
+        if event.input.id == "chat_input_box":
+            text = (event.value or "").strip()
+            if not text:
+                return
+            self.app.run_worker(self._send_and_get_reply(text))
+            self.chat_input.value = ""
+            self.chat_input.focus()
 
 
 class PktaiTUI(App):
@@ -49,17 +127,18 @@ class PktaiTUI(App):
     Screen { layout: vertical; }
     #body { layout: horizontal; height: 1fr; }
     #left { width: 3fr; layout: vertical; }
-    #chat { width: 1fr; layout: vertical; border: round $primary; }
+    #chat { width: 1fr; layout: vertical; border: round $primary; overflow-x: hidden; }
 
     PacketList { height: 1fr; overflow-y: auto; }
     #details { height: 1fr; overflow-y: auto; }
 
     /* Chat pane layout */
     #chat_header { dock: top; padding: 1 1; content-align: center middle; }
-    #chat_log { height: 1fr; overflow-y: auto; }
+    #chat_log { height: 1fr; overflow-y: auto; overflow-x: hidden; text-wrap: wrap; }
     #chat_input_row { layout: horizontal; height: auto; padding: 1; }
     #chat_input_box { width: 1fr; }
     #send_btn { width: 12; margin-left: 1; }
+    #new_chat_btn { width: 1fr; padding: 0 1; margin: 0 1 1 1; }
     """
 
     BINDINGS = [
