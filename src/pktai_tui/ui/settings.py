@@ -16,6 +16,11 @@ except Exception:  # pragma: no cover - fallback if not present
     HAS_SLIDER = False
 
 from ..services import LLMService
+from ..services.config import (
+    ensure_initialized as cfg_ensure_initialized,
+    list_providers as cfg_list_providers,
+    upsert_provider as cfg_upsert_provider,
+)
 
 
 class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
@@ -29,10 +34,10 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         align: center middle;
     }
     #dialog {
-        width: 60;
-        max-width: 80;
+        width: 90;
+        max-width: 120;
         border: round $primary;
-        padding: 1 2;
+        padding: 1 3;
         background: $surface;
     }
     #title { content-align: center middle; padding: 0 0 1 0; }
@@ -41,7 +46,13 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
     #value_hint { color: $text 70%; }
     .inline { layout: horizontal; }
     #provider_row Select { width: 1fr; }
-    #test_btn { width: 6; margin-left: 1; }
+    /* Make form controls expand for breathing room */
+    .row Input { width: 1fr; }
+    .row Select { width: 1fr; }
+    /* Model row specifics: let selector/input grow; keep test button compact */
+    #model_select { width: 1fr; }
+    #model_input { width: 1fr; }
+    #test_btn { width: 8; margin-left: 1; }
     """
 
     BINDINGS = [
@@ -66,6 +77,26 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
             "Fireworks": ("https://api.fireworks.ai/inference/v1", ""),
             "Custom": ("", ""),
         }
+        # Load user providers from YAML (~/.pktai/.pktai.yaml)
+        self._supports_list: Dict[str, bool] = {}
+        self._static_models: Dict[str, List[str]] = {}
+        try:
+            cfg_ensure_initialized()
+            for p in cfg_list_providers():
+                alias = str(p.get("alias") or "").strip()
+                if not alias:
+                    continue
+                base_url = str(p.get("base_url") or "").strip()
+                api_key = str(p.get("api_key") or "")
+                if base_url:
+                    # Add/override preset for this alias
+                    self._presets[alias] = (base_url, api_key)
+                self._supports_list[alias] = bool(p.get("supports_list", True))
+                sm = p.get("static_models") or []
+                if isinstance(sm, list):
+                    self._static_models[alias] = [str(x) for x in sm if isinstance(x, (str, int, float))]
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         with Container(id="dialog"):
@@ -245,23 +276,29 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if "context_window" in self._current:
             context_window.value = str(self._current.get("context_window", ""))
 
-        # Load models asynchronously (initial) only for non-Custom providers
+        # Load models for initial provider: use static list if provider doesn't support list()
         if prov != "Custom":
             try:
-                models = await self._llm.list_models()
-                self._models = models or []
-                options = [(m, m) for m in self._models]
-                if not options:
-                    options = [(self._llm.model or "", self._llm.model or "")]
-                model_select.set_options(options)
-                # Selection policy: if user has not overridden a model, prefer the first discovered model
-                user_overrode_model = bool(cur.get("model"))
-                if not user_overrode_model and options:
+                if self._supports_list.get(prov, True) is False:
+                    static_list = self._static_models.get(prov, [])
+                    options = [(m, m) for m in static_list] or [(self._llm.model or "", self._llm.model or "")]
+                    model_select.set_options(options)
                     model_select.value = options[0][1]
                 else:
-                    current_model = init_model
-                    selected = current_model if any(m == current_model for m in self._models) else options[0][1]
-                    model_select.value = selected
+                    models = await self._llm.list_models()
+                    self._models = models or []
+                    options = [(m, m) for m in self._models]
+                    if not options:
+                        options = [(self._llm.model or "", self._llm.model or "")]
+                    model_select.set_options(options)
+                    # Selection policy: if user has not overridden a model, prefer the first discovered model
+                    user_overrode_model = bool(cur.get("model"))
+                    if not user_overrode_model and options:
+                        model_select.value = options[0][1]
+                    else:
+                        current_model = init_model
+                        selected = current_model if any(m == current_model for m in self._models) else options[0][1]
+                        model_select.value = selected
             except Exception:
                 model_select.set_options([(self._llm.model or "", self._llm.model or "")])
                 model_select.value = init_model or (self._llm.model or "")
@@ -274,8 +311,17 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
             self.dismiss(None)
             return
         if event.button.id == "test_btn":
-            # Build a temporary client with current inputs and try to list models
+            # If provider doesn't support list(), load static models from YAML instead of calling list()
             provider = self.query_one("#provider_select", Select).value or "Custom"
+            if self._supports_list.get(str(provider), True) is False:
+                static_list = self._static_models.get(str(provider), [])
+                model_select = self.query_one("#model_select", Select)
+                options = [(m, m) for m in static_list] or [(self._llm.model or "", self._llm.model or "")]
+                model_select.set_options(options)
+                model_select.value = options[0][1]
+                self.app.notify("Loaded static models from ~/.pktai/.pktai.yaml", severity="information")
+                return
+            # Otherwise, build a temporary client and try to list models
             base_url = (self.query_one("#base_url", Input).value or "").strip()
             api_key = (self.query_one("#api_key", Input).value or "").strip()
             # Apply preset if chosen and fields are empty
@@ -347,6 +393,14 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
             if ctx is not None:
                 overrides["context_window"] = ctx
 
+            # Persist custom provider into YAML and refresh presets
+            if provider == "Custom":
+                alias_val = (self.query_one("#alias", Input).value or "").strip()
+                if alias_val and base_url:
+                    try:
+                        cfg_upsert_provider(alias=alias_val, base_url=base_url, api_key=api_key)
+                    except Exception:
+                        pass
             self.dismiss(overrides)
 
     if HAS_SLIDER:
@@ -391,6 +445,18 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                     api_key_in.placeholder = "API KEY NOT NEEDED"
                 else:
                     api_key_in.placeholder = "sk-..."
+            except Exception:
+                pass
+            # If provider doesn't support list(), set model dropdown to static list now
+            try:
+                if self._supports_list.get(name, True) is False:
+                    ms = self.query_one("#model_select", Select)
+                    models = self._static_models.get(name, [])
+                    opts = [(m, m) for m in models]
+                    if not opts:
+                        opts = [(self._llm.model or "", self._llm.model or "")]
+                    ms.set_options(opts)
+                    ms.value = opts[0][1]
             except Exception:
                 pass
             # Toggle UI depending on provider

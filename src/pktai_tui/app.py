@@ -16,6 +16,7 @@ from rich.markdown import Markdown as RichMarkdown
 from urllib.parse import urlparse
 
 from .models import PacketRow
+from .services.config import ensure_initialized as cfg_ensure_initialized
 from .ui import PacketList, SettingsScreen
 from .services.capture import parse_capture, build_packet_view
 from .services.capture import packets_to_text
@@ -566,6 +567,11 @@ class PktaiTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Ensure ~/.pktai/.pktai.yaml exists so providers/models can be loaded
+        try:
+            cfg_ensure_initialized()
+        except Exception:
+            pass
         self.packet_list = self.query_one(PacketList)
         self.details_tree = self.query_one("#details", Tree)
         # Store raw pyshark packet objects to allow in-memory filtering
