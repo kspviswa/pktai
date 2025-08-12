@@ -214,3 +214,28 @@
 - Tune classification prompts and sampling of packet dump for very large captures.
 - Add unit tests for `packets_to_text()` and filter validation edge cases.
 - Consider showing the active display filter in the UI status area.
+
+### YAML Providers Config & Settings Refactor (2025-08-12)
+
+- Settings pane is now fully YAML-driven from `~/.pktai/pktai.yaml`. The file is auto-created on first run with a fact-checked providers template.
+
+#### What Changed
+- `src/pktai_tui/services/config.py`
+  - Renamed config to `pktai.yaml` (under `~/.pktai/`).
+  - `ensure_initialized()` seeds providers (Perplexity, OpenAI, Together, Groq, Fireworks, OpenRouter, DeepInfra, Ollama, LM Studio, Anthropic, Google Gemini, Cohere, Mistral). Removed Azure OpenAI.
+- `src/pktai_tui/ui/settings.py`
+  - Provider list comes only from YAML plus a “Custom” UI option.
+  - API keys now load from YAML on open and when provider changes.
+  - Save persists to YAML:
+    - Known providers: saves `api_key` and `base_url` under the provider alias.
+    - Custom providers: requires Alias + Base URL; checks alias conflicts (toast on conflict); saves `api_key`, `base_url`, `supports_list: false`, and `static_models` parsed from a comma-separated model input. The first model is used as the session model.
+  - Custom model input placeholder: “Comma-separated models (e.g., modelA, modelB)”.
+  - If a provider doesn’t support listing, static models from YAML populate the dropdown.
+- `src/pktai_tui/app.py`
+  - Ensures `~/.pktai/pktai.yaml` exists at startup.
+
+#### Usage
+- Press `s` to open Settings.
+- Known provider: edit Base URL/API Key and Save to persist to YAML.
+- Custom provider: enter Alias, Base URL, and comma-separated Models; Save to create a new YAML entry (with alias conflict protection).
+- Reopen Settings or switch providers; saved API keys auto-populate.

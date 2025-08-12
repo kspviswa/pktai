@@ -567,7 +567,7 @@ class PktaiTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        # Ensure ~/.pktai/.pktai.yaml exists so providers/models can be loaded
+        # Ensure ~/.pktai/pktai.yaml exists so providers/models can be loaded
         try:
             cfg_ensure_initialized()
         except Exception:

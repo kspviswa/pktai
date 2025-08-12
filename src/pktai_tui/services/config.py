@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 CONFIG_DIRNAME = ".pktai"
-CONFIG_FILENAME = ".pktai.yaml"
+CONFIG_FILENAME = "pktai.yaml"
 
 
 def get_config_dir() -> Path:
@@ -20,9 +20,12 @@ def get_config_path() -> Path:
 
 
 def ensure_initialized() -> None:
-    """Ensure ~/.pktai/.pktai.yaml exists with reasonable defaults.
+    """Ensure ~/.pktai/pktai.yaml exists with reasonable defaults.
 
-    Adds a Perplexity provider with static model list by default if file is missing.
+    If missing, create a providers template populated with common providers.
+    For providers that support the OpenAI models list endpoint, do not include
+    static model names (supports_list: true). Others include representative
+    static_models values.
     """
     cfg_dir = get_config_dir()
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -31,10 +34,11 @@ def ensure_initialized() -> None:
         return
     data: Dict[str, Any] = {
         "providers": [
+            # Perplexity (OpenAI-format, no /v1/models endpoint)
             {
                 "alias": "Perplexity",
                 "base_url": "https://api.perplexity.ai",
-                "api_key": "",  # user will fill
+                "api_key": "",
                 "supports_list": False,
                 "static_models": [
                     "sonar",
@@ -43,7 +47,95 @@ def ensure_initialized() -> None:
                     "sonar-reasoning-pro",
                     "sonar-deep-research",
                 ],
-            }
+            },
+            # OpenAI-compatible (auto model listing)
+            {
+                "alias": "OpenAI",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "Together",
+                "base_url": "https://api.together.xyz/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "Groq",
+                "base_url": "https://api.groq.com/openai/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "Fireworks",
+                "base_url": "https://api.fireworks.ai/inference/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "OpenRouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "DeepInfra",
+                "base_url": "https://api.deepinfra.com/v1/openai",
+                "api_key": "",
+                "supports_list": True,
+            },
+            # Local OpenAI-compatible
+            {
+                "alias": "Ollama",
+                "base_url": "http://localhost:11434/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            {
+                "alias": "LM Studio",
+                "base_url": "http://localhost:1234/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
+            # Non-OpenAI APIs
+            {
+                "alias": "Anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "",
+                "supports_list": False,
+                "static_models": [
+                    "claude-3-5-sonnet-latest",
+                    "claude-3-5-haiku-latest",
+                ],
+            },
+            {
+                "alias": "Google Gemini",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "api_key": "",
+                "supports_list": False,
+                "static_models": [
+                    "gemini-1.5-pro",
+                    "gemini-1.5-flash",
+                ],
+            },
+            {
+                "alias": "Cohere",
+                "base_url": "https://api.cohere.com",
+                "api_key": "",
+                "supports_list": False,
+                "static_models": [
+                    "command-r-plus",
+                    "command-r",
+                ],
+            },
+            # Mistral has OpenAI-compatible endpoints including /v1/models
+            {
+                "alias": "Mistral",
+                "base_url": "https://api.mistral.ai/v1",
+                "api_key": "",
+                "supports_list": True,
+            },
         ]
     }
     with cfg_path.open("w", encoding="utf-8") as f:

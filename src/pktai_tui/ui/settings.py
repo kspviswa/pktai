@@ -64,20 +64,9 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._current = current or {}
         self._llm = LLMService.from_env()
         self._models: List[str] = []
-        # Provider presets (OpenAI-compatible)
-        self._presets: Dict[str, Tuple[str, str]] = {
-            "Ollama (local)": ("http://localhost:11434/v1", "ollama"),
-            "OpenAI": ("https://api.openai.com/v1", ""),
-            "Google": ("https://generativelanguage.googleapis.com/openai/", ""),
-            "Anthropic": ("https://api.anthropic.com/v1", ""),
-            "OpenRouter": ("https://openrouter.ai/api/v1", ""),
-            "Perplexity": ("https://api.perplexity.ai", ""),
-            "Groq": ("https://api.groq.com/openai/v1", ""),
-            "Together": ("https://api.together.xyz/v1", ""),
-            "Fireworks": ("https://api.fireworks.ai/inference/v1", ""),
-            "Custom": ("", ""),
-        }
-        # Load user providers from YAML (~/.pktai/.pktai.yaml)
+        # Provider presets populated from ~/.pktai/pktai.yaml only
+        self._presets: Dict[str, Tuple[str, str]] = {}
+        # Load user providers from YAML (~/.pktai/pktai.yaml)
         self._supports_list: Dict[str, bool] = {}
         self._static_models: Dict[str, List[str]] = {}
         try:
@@ -95,6 +84,8 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 sm = p.get("static_models") or []
                 if isinstance(sm, list):
                     self._static_models[alias] = [str(x) for x in sm if isinstance(x, (str, int, float))]
+            # Always include a Custom option as a UI affordance (not a provider preset)
+            self._presets["Custom"] = ("", "")
         except Exception:
             pass
 
@@ -105,10 +96,7 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 # Provider / host
                 with Vertical(classes="row", id="provider_row"):
                     yield Static("Model host (provider)")
-                    yield Select(
-                        options=[(k, k) for k in self._presets.keys()],
-                        id="provider_select",
-                    )
+                    yield Select(options=[(k, k) for k in self._presets.keys()], id="provider_select")
                 # Base URL + API key
                 with Vertical(classes="row"):
                     yield Static("Base URL")
@@ -127,7 +115,7 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                         # Dropdown is used for known providers; hidden for Custom
                         yield Select(options=[("Loading models...", "")], id="model_select")
                         # Free-text input used for Custom provider
-                        yield Input(placeholder="Type a model name", id="model_input")
+                        yield Input(placeholder="Comma-separated models (e.g., modelA, modelB)", id="model_input")
                         # Compact test connection button (hidden for Custom)
                         yield Button("🔌", id="test_btn", variant="primary")
                 # Temperature (slider 0-100 mapped to 0-1)
@@ -189,10 +177,10 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         init_base = str(cur.get("base_url") or self._llm.base_url)
         init_key = str(cur.get("api_key") or self._llm.api_key)
         init_model = str(cur.get("model") or self._llm.model)
-        # Pick provider by matching base URL prefix
+        # Pick provider by matching base URL prefix among YAML providers (fallback: Custom)
         prov = "Custom"
         for name, (url, _k) in self._presets.items():
-            if url and init_base.startswith(url):
+            if name != "Custom" and url and init_base.startswith(url):
                 prov = name
                 break
         provider_select.value = prov
@@ -237,14 +225,22 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if prov == "Custom":
             alias_in.value = str(self._current.get("alias", ""))
             model_input.value = init_model if init_model else ""
-        # For Ollama, do not prefill API key; show helpful placeholder
-        if prov.startswith("Ollama") and not cur.get("api_key"):
-            api_key_in.value = ""
-            try:
-                api_key_in.placeholder = "API KEY NOT NEEDED"
-            except Exception:
-                pass
-        else:
+        # Prefill API key: prefer explicit override; else YAML preset; special-case Ollama placeholder
+        try:
+            preset_key = ""
+            if prov in self._presets:
+                _url, preset_key = self._presets.get(prov, ("", ""))
+            # If user didn't explicitly pass an override, use preset key from YAML
+            key_val = init_key if str(cur.get("api_key") or "") else preset_key
+            if prov.startswith("Ollama") and not key_val:
+                api_key_in.value = ""
+                try:
+                    api_key_in.placeholder = "API KEY NOT NEEDED"
+                except Exception:
+                    pass
+            else:
+                api_key_in.value = key_val or ""
+        except Exception:
             api_key_in.value = init_key
         # Prefill sliders
         def to_pct(v: float) -> int:
@@ -319,7 +315,7 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 options = [(m, m) for m in static_list] or [(self._llm.model or "", self._llm.model or "")]
                 model_select.set_options(options)
                 model_select.value = options[0][1]
-                self.app.notify("Loaded static models from ~/.pktai/.pktai.yaml", severity="information")
+                self.app.notify("Loaded static models from ~/.pktai/pktai.yaml", severity="information")
                 return
             # Otherwise, build a temporary client and try to list models
             base_url = (self.query_one("#base_url", Input).value or "").strip()
@@ -349,9 +345,11 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 preset_url, preset_key = self._presets[provider]
                 base_url = base_url or preset_url
                 api_key = api_key or preset_key
-            # Model: from input for Custom, from select otherwise
+            # Model: from input for Custom (comma-separated), from select otherwise
             if provider == "Custom":
-                model = (self.query_one("#model_input", Input).value or "").strip()
+                model_raw = (self.query_one("#model_input", Input).value or "").strip()
+                models_list = [m.strip() for m in model_raw.split(",") if m.strip()]
+                model = models_list[0] if models_list else ""
             else:
                 model = self.query_one("#model_select", Select).value or (self._llm.model or "")
             temp_slider = self.query_one("#temperature_slider", Slider) if HAS_SLIDER else None  # type: ignore[name-defined]
@@ -393,14 +391,33 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
             if ctx is not None:
                 overrides["context_window"] = ctx
 
-            # Persist custom provider into YAML and refresh presets
-            if provider == "Custom":
-                alias_val = (self.query_one("#alias", Input).value or "").strip()
-                if alias_val and base_url:
-                    try:
-                        cfg_upsert_provider(alias=alias_val, base_url=base_url, api_key=api_key)
-                    except Exception:
-                        pass
+            # Persist to YAML
+            try:
+                if provider == "Custom":
+                    # Require alias and base_url; prevent alias conflict
+                    alias_val = (self.query_one("#alias", Input).value or "").strip()
+                    if not alias_val or not base_url:
+                        self.app.notify("Alias and Base URL are required for Custom provider.", severity="warning")
+                        return
+                    # Conflict check
+                    existing = {str(p.get("alias")) for p in cfg_list_providers() if isinstance(p, dict)}
+                    if alias_val in existing:
+                        self.app.notify(f"Alias '{alias_val}' already exists. Choose a different name.", severity="error")
+                        return
+                    # Persist with static_models (from comma-separated input) and supports_list=False
+                    cfg_upsert_provider(
+                        alias=alias_val,
+                        base_url=base_url,
+                        api_key=api_key,
+                        supports_list=False,
+                        static_models=models_list if 'models_list' in locals() else [],
+                    )
+                else:
+                    # Known provider: persist updated api_key/base_url under its alias
+                    cfg_upsert_provider(alias=str(provider), base_url=base_url, api_key=api_key)
+            except Exception as e:
+                self.app.notify(f"Failed to save provider: {e}", severity="error")
+                return
             self.dismiss(overrides)
 
     if HAS_SLIDER:
@@ -438,10 +455,10 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
             base_url_in = self.query_one("#base_url", Input)
             api_key_in = self.query_one("#api_key", Input)
             base_url_in.value = url or ""
-            # Always wipe API key on host change; adjust placeholder to guide user
-            api_key_in.value = ""
+            # Load API key from YAML preset for the selected provider
+            api_key_in.value = key or ""
             try:
-                if name.startswith("Ollama"):
+                if name.startswith("Ollama") and not api_key_in.value:
                     api_key_in.placeholder = "API KEY NOT NEEDED"
                 else:
                     api_key_in.placeholder = "sk-..."
