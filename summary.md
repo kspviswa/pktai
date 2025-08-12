@@ -195,6 +195,7 @@
 - Added an in-repo orchestrator that routes chat input between Chat, Packet, and Packet Filter agents. NL display-filter requests immediately update the packets pane.
 
 ### What Changed
+- added config file support
 - `src/pktai_tui/services/agents.py`
   - Implemented `Orchestrator.route()` with filter-first heuristic; accepts a filter only if it parses via our `Lexer`/`Parser` (prevents misrouting packet questions).
   - Implemented `ChatAgent`, `PacketAgent`, `PacketFilterAgent` with output sanitation (removes `<think>` and code fences).
