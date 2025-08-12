@@ -29,16 +29,41 @@ class LLMService:
 
     @classmethod
     def from_env(cls) -> "LLMService":
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        # Ollama ignores the key but OpenAI client requires something present
-        api_key = os.getenv("OPENAI_API_KEY", "ollama")
-        model = os.getenv("OLLAMA_MODEL", "qwen3:latest")
+        # Prefer generic envs; fall back to legacy OLLAMA_* for backward compatibility
+        base_url = (
+            os.getenv("LLM_BASE_URL")
+            or os.getenv("OLLAMA_BASE_URL")
+            or "http://localhost:11434/v1"
+        )
+        # Many OpenAI-compatible servers require a key; Ollama ignores it
+        api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
+        model = os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL")
         # Allow override; default aligns with current UI expectations
         try:
             temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
         except ValueError:
             temperature = 0.2
         return cls(base_url=base_url, api_key=api_key, model=model, temperature=temperature)
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        temperature: Optional[float] = None,
+    ) -> "LLMService":
+        """Construct from explicit configuration, with sensible defaults.
+
+        If temperature is None, uses 0.2.
+        """
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            temperature=0.2 if temperature is None else float(temperature),
+        )
 
     async def chat(
         self,
@@ -80,3 +105,37 @@ class LLMService:
             if isinstance(mid, str):
                 ids.append(mid)
         return ids
+
+    async def ping(self) -> tuple[bool, list[str] | None, str | None]:
+        """Quick connectivity check returning (ok, models, error_message).
+
+        Used by UI to show a green/red status light and to refresh model choices.
+        """
+        # 1) Try listing models if supported
+        try:
+            ids = await self.list_models()
+        except Exception:
+            ids = None
+
+        if isinstance(ids, list):
+            # If we have a non-empty list, prefer the first model and succeed
+            if ids:
+                try:
+                    self.model = ids[0]
+                except Exception:
+                    pass
+                return True, ids, None
+            # If listing worked but returned empty, fall through to chat-based check
+
+        # 2) Fallback: attempt a tiny chat completion as connectivity test.
+        # Requires that a model is set (e.g., provided by user for Custom providers).
+        try:
+            # Keep the payload minimal to avoid cost/latency.
+            _ = await self.chat(
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=8,
+            )
+            # If we got here without raising, consider connectivity OK.
+            return True, ids if isinstance(ids, list) and ids else None, None
+        except Exception as e:
+            return False, None, str(e)

@@ -357,25 +357,30 @@ wheels = [
 ]
 
 [[package]]
-name = "pktai-tui"
+name = "pktai"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
     { name = "pyshark" },
-    { name = "pytest" },
     { name = "textual" },
     { name = "textual-fspicker" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "openai", specifier = ">=1.30.0" },
     { name = "pyshark", specifier = ">=0.6.0" },
-    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
     { name = "textual", specifier = ">=0.70.0" },
     { name = "textual-fspicker", specifier = ">=0.4.0" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "platformdirs"

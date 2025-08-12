@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from textual.screen import ModalScreen
 from textual.app import ComposeResult
@@ -39,6 +39,9 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
     .row { padding: 0 0 1 0; }
     #actions { padding-top: 1; }
     #value_hint { color: $text 70%; }
+    .inline { layout: horizontal; }
+    #provider_row Select { width: 1fr; }
+    #test_btn { width: 6; margin-left: 1; }
     """
 
     BINDINGS = [
@@ -50,15 +53,52 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._current = current or {}
         self._llm = LLMService.from_env()
         self._models: List[str] = []
+        # Provider presets (OpenAI-compatible)
+        self._presets: Dict[str, Tuple[str, str]] = {
+            "Ollama (local)": ("http://localhost:11434/v1", "ollama"),
+            "OpenAI": ("https://api.openai.com/v1", ""),
+            "Google": ("https://generativelanguage.googleapis.com/openai/", ""),
+            "Anthropic": ("https://api.anthropic.com/v1", ""),
+            "OpenRouter": ("https://openrouter.ai/api/v1", ""),
+            "Perplexity": ("https://api.perplexity.ai", ""),
+            "Groq": ("https://api.groq.com/openai/v1", ""),
+            "Together": ("https://api.together.xyz/v1", ""),
+            "Fireworks": ("https://api.fireworks.ai/inference/v1", ""),
+            "Custom": ("", ""),
+        }
 
     def compose(self) -> ComposeResult:
         with Container(id="dialog"):
             with Vertical(id="settings_root"):
                 yield Static("LLM Settings", id="title")
+                # Provider / host
+                with Vertical(classes="row", id="provider_row"):
+                    yield Static("Model host (provider)")
+                    yield Select(
+                        options=[(k, k) for k in self._presets.keys()],
+                        id="provider_select",
+                    )
+                # Base URL + API key
+                with Vertical(classes="row"):
+                    yield Static("Base URL")
+                    yield Input(placeholder="https://.../v1", id="base_url")
+                with Vertical(classes="row"):
+                    yield Static("API Key")
+                    yield Input(placeholder="sk-...", password=True, id="api_key")
+                # Alias (only for Custom provider)
+                with Vertical(classes="row", id="alias_row"):
+                    yield Static("Alias")
+                    yield Input(placeholder="e.g., My Provider", id="alias")
                 # Model
                 with Vertical(classes="row"):
                     yield Static("Model")
-                    yield Select(options=[("Loading models...", "")], id="model_select")
+                    with Horizontal(classes="inline"):
+                        # Dropdown is used for known providers; hidden for Custom
+                        yield Select(options=[("Loading models...", "")], id="model_select")
+                        # Free-text input used for Custom provider
+                        yield Input(placeholder="Type a model name", id="model_input")
+                        # Compact test connection button (hidden for Custom)
+                        yield Button("🔌", id="test_btn", variant="primary")
                 # Temperature (slider 0-100 mapped to 0-1)
                 with Vertical(classes="row"):
                     yield Static("Temperature (0-1)")
@@ -97,6 +137,12 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
     async def on_mount(self) -> None:
         # Widgets
         model_select = self.query_one("#model_select", Select)
+        model_input = self.query_one("#model_input", Input)
+        provider_select = self.query_one("#provider_select", Select)
+        base_url_in = self.query_one("#base_url", Input)
+        api_key_in = self.query_one("#api_key", Input)
+        alias_row = self.query_one("#alias_row", Vertical)
+        alias_in = self.query_one("#alias", Input)
         temp_value = self.query_one("#temperature_value", Static)
         topp_value = self.query_one("#top_p_value", Static)
         temp_slider = self.query_one("#temperature_slider", Slider) if HAS_SLIDER else None  # type: ignore[name-defined]
@@ -106,6 +152,69 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         max_tokens = self.query_one("#max_tokens", Input)
         context_window = self.query_one("#context_window", Input)
 
+        # Prefill provider/base_url/api_key/model from current or env
+        # Determine initial provider based on current/base_url
+        cur = dict(self._current)
+        init_base = str(cur.get("base_url") or self._llm.base_url)
+        init_key = str(cur.get("api_key") or self._llm.api_key)
+        init_model = str(cur.get("model") or self._llm.model)
+        # Pick provider by matching base URL prefix
+        prov = "Custom"
+        for name, (url, _k) in self._presets.items():
+            if url and init_base.startswith(url):
+                prov = name
+                break
+        provider_select.value = prov
+        base_url_in.value = init_base
+        # Alias visibility and value (only for Custom)
+        try:
+            is_custom = prov == "Custom"
+            # Toggle alias row
+            try:
+                alias_row.display = is_custom  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    alias_row.styles.display = "block" if is_custom else "none"
+                except Exception:
+                    pass
+            # Toggle model input vs select and test button
+            try:
+                model_input.display = is_custom  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    model_input.styles.display = "block" if is_custom else "none"
+                except Exception:
+                    pass
+            try:
+                model_select.display = not is_custom  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    model_select.styles.display = "block" if not is_custom else "none"
+                except Exception:
+                    pass
+            try:
+                test_btn = self.query_one("#test_btn", Button)
+                try:
+                    test_btn.display = not is_custom  # type: ignore[attr-defined]
+                except Exception:
+                    test_btn.styles.display = "block" if not is_custom else "none"
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Prefill alias and model input values when Custom
+        if prov == "Custom":
+            alias_in.value = str(self._current.get("alias", ""))
+            model_input.value = init_model if init_model else ""
+        # For Ollama, do not prefill API key; show helpful placeholder
+        if prov.startswith("Ollama") and not cur.get("api_key"):
+            api_key_in.value = ""
+            try:
+                api_key_in.placeholder = "API KEY NOT NEEDED"
+            except Exception:
+                pass
+        else:
+            api_key_in.value = init_key
         # Prefill sliders
         def to_pct(v: float) -> int:
             try:
@@ -136,21 +245,26 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if "context_window" in self._current:
             context_window.value = str(self._current.get("context_window", ""))
 
-        # Load models asynchronously
-        try:
-            models = await self._llm.list_models()
-            self._models = models or []
-            options = [(m, m) for m in self._models]
-            if not options:
-                options = [(self._llm.model, self._llm.model)]
-            model_select.set_options(options)
-            # Select current model if present; else first
-            current_model = (self._current.get("model") or self._llm.model)
-            selected = current_model if any(m == current_model for m in self._models) else options[0][1]
-            model_select.value = selected
-        except Exception:
-            model_select.set_options([(self._llm.model, self._llm.model)])
-            model_select.value = self._llm.model
+        # Load models asynchronously (initial) only for non-Custom providers
+        if prov != "Custom":
+            try:
+                models = await self._llm.list_models()
+                self._models = models or []
+                options = [(m, m) for m in self._models]
+                if not options:
+                    options = [(self._llm.model or "", self._llm.model or "")]
+                model_select.set_options(options)
+                # Selection policy: if user has not overridden a model, prefer the first discovered model
+                user_overrode_model = bool(cur.get("model"))
+                if not user_overrode_model and options:
+                    model_select.value = options[0][1]
+                else:
+                    current_model = init_model
+                    selected = current_model if any(m == current_model for m in self._models) else options[0][1]
+                    model_select.value = selected
+            except Exception:
+                model_select.set_options([(self._llm.model or "", self._llm.model or "")])
+                model_select.value = init_model or (self._llm.model or "")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -159,9 +273,41 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if event.button.id == "cancel":
             self.dismiss(None)
             return
+        if event.button.id == "test_btn":
+            # Build a temporary client with current inputs and try to list models
+            provider = self.query_one("#provider_select", Select).value or "Custom"
+            base_url = (self.query_one("#base_url", Input).value or "").strip()
+            api_key = (self.query_one("#api_key", Input).value or "").strip()
+            # Apply preset if chosen and fields are empty
+            if provider in self._presets:
+                preset_url, _preset_key = self._presets[provider]
+                if not base_url:
+                    base_url = preset_url
+            if not base_url:
+                self.app.notify("Base URL is required to test.", severity="warning")
+                return
+            try:
+                tmp = LLMService.from_config(base_url=base_url, api_key=api_key or "", model=self._llm.model)
+                worker = self.app.run_worker(self._do_test_and_update(tmp))
+                setattr(self, "_test_worker", worker)
+            except Exception as e:
+                self.app.notify(f"Test failed: {e}", severity="error")
+            return
         if event.button.id == "save":
             # Collect values
-            model = self.query_one("#model_select", Select).value or self._llm.model
+            provider = self.query_one("#provider_select", Select).value or "Custom"
+            base_url = (self.query_one("#base_url", Input).value or "").strip()
+            api_key = (self.query_one("#api_key", Input).value or "").strip()
+            # Apply preset defaults if any missing
+            if provider in self._presets:
+                preset_url, preset_key = self._presets[provider]
+                base_url = base_url or preset_url
+                api_key = api_key or preset_key
+            # Model: from input for Custom, from select otherwise
+            if provider == "Custom":
+                model = (self.query_one("#model_input", Input).value or "").strip()
+            else:
+                model = self.query_one("#model_select", Select).value or (self._llm.model or "")
             temp_slider = self.query_one("#temperature_slider", Slider) if HAS_SLIDER else None  # type: ignore[name-defined]
             topp_slider = self.query_one("#top_p_slider", Slider) if HAS_SLIDER else None  # type: ignore[name-defined]
             temp_input = self.query_one("#temperature_input", Input) if not HAS_SLIDER else None
@@ -175,7 +321,11 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 except Exception:
                     return None
 
-            overrides: Dict[str, Any] = {"model": model}
+            overrides: Dict[str, Any] = {"model": model, "base_url": base_url, "api_key": api_key, "provider": provider}
+            if provider == "Custom":
+                alias_val = (self.query_one("#alias", Input).value or "").strip()
+                if alias_val:
+                    overrides["alias"] = alias_val
             if HAS_SLIDER and temp_slider is not None:
                 overrides["temperature"] = round(temp_slider.value / 100.0, 2)
             else:
@@ -205,3 +355,88 @@ class SettingsScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 self.query_one("#temperature_value", Static).update(f"{event.value/100:.2f}")
             elif event.slider.id == "top_p_slider":
                 self.query_one("#top_p_value", Static).update(f"{event.value/100:.2f}")
+
+    async def _do_test_and_update(self, tmp: LLMService) -> None:
+        """Run connectivity test and update model list on success."""
+        try:
+            ok, ids, err = await tmp.ping()
+            model_select = self.query_one("#model_select", Select)
+            if ok:
+                opts = [(m, m) for m in (ids or [])]
+                if not opts:
+                    opts = [(tmp.model, tmp.model)]
+                model_select.set_options(opts)
+                model_select.value = opts[0][1]
+                self.app.notify("Connection ok.", severity="information")
+            else:
+                self.app.notify(f"Connection failed: {err}", severity="error")
+        except Exception as e:
+            self.app.notify(f"Test error: {e}", severity="error")
+
+    def on_select_changed(self, event: Select.Changed) -> None:  # type: ignore[override]
+        # When provider changes, immediately set base URL; fill API key only if empty
+        if event.select.id == "provider_select":
+            name = str(event.value or "")
+            preset = self._presets.get(name)
+            if preset is None:
+                return
+            url, key = preset
+            base_url_in = self.query_one("#base_url", Input)
+            api_key_in = self.query_one("#api_key", Input)
+            base_url_in.value = url or ""
+            # Always wipe API key on host change; adjust placeholder to guide user
+            api_key_in.value = ""
+            try:
+                if name.startswith("Ollama"):
+                    api_key_in.placeholder = "API KEY NOT NEEDED"
+                else:
+                    api_key_in.placeholder = "sk-..."
+            except Exception:
+                pass
+            # Toggle UI depending on provider
+            try:
+                model_select = self.query_one("#model_select", Select)
+                model_input = self.query_one("#model_input", Input)
+                alias_row = self.query_one("#alias_row", Vertical)
+                test_btn = self.query_one("#test_btn", Button)
+                is_custom = name == "Custom"
+                # Alias row
+                try:
+                    alias_row.display = is_custom  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        alias_row.styles.display = "block" if is_custom else "none"
+                    except Exception:
+                        pass
+                # Model input vs select
+                try:
+                    model_input.display = is_custom  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        model_input.styles.display = "block" if is_custom else "none"
+                    except Exception:
+                        pass
+                try:
+                    model_select.display = not is_custom  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        model_select.styles.display = "block" if not is_custom else "none"
+                    except Exception:
+                        pass
+                # Test button hidden for Custom
+                try:
+                    test_btn.display = not is_custom  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        test_btn.styles.display = "block" if not is_custom else "none"
+                    except Exception:
+                        pass
+                # For non-Custom, clear models until user tests connection
+                if not is_custom:
+                    try:
+                        model_select.set_options([("Click the button to load models", "")])
+                        model_select.value = ""
+                    except Exception:
+                        pass
+            except Exception:
+                pass

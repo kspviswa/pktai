@@ -13,6 +13,7 @@ import textwrap
 import asyncio
 from rich.text import Text
 from rich.markdown import Markdown as RichMarkdown
+from urllib.parse import urlparse
 
 from .models import PacketRow
 from .ui import PacketList, SettingsScreen
@@ -55,6 +56,8 @@ class ChatPane(Container):
             yield Button("Send", id="send_btn", variant="primary")
         # New chat button below input row
         yield Button("New Chat", id="new_chat_btn", variant="success")
+        # Connectivity status (green/red light + model name)
+        yield Static("🔴 Checking...", id="conn_status")
 
     def on_mount(self) -> None:
         # Chat state
@@ -64,6 +67,7 @@ class ChatPane(Container):
         self.chat_input = self.query_one("#chat_input_box", Input)
         self.send_button = self.query_one("#send_btn", Button)
         self.new_chat_button = self.query_one("#new_chat_btn", Button)
+        self.conn_status = self.query_one("#conn_status", Static)
         # Pending assistant message placeholder refs
         self._pending: dict[str, object] | None = None
         # LLM service abstraction
@@ -72,6 +76,8 @@ class ChatPane(Container):
         self.orchestrator = Orchestrator()
         # Current in-flight worker for LLM request (for cancellation)
         self._current_worker = None  # type: ignore[assignment]
+        # Initial connectivity check
+        self.app.run_worker(self._update_connectivity())
 
     def _make_avatar(self, role: str) -> Static:
         emoji = "👤" if role == "user" else "🤖"
@@ -203,6 +209,87 @@ class ChatPane(Container):
         self._pending = None
         self.chat_input.value = ""
         self.chat_input.focus()
+
+    def apply_llm_config(self, overrides: dict[str, object] | None) -> None:
+        """Apply overrides by rebuilding the LLM client and refreshing connectivity."""
+        try:
+            o = dict(overrides or {})
+            base_url = str(o.get("base_url") or self.llm_service.base_url)
+            api_key = str(o.get("api_key") or self.llm_service.api_key)
+            model = str(o.get("model") or self.llm_service.model)
+            temp = o.get("temperature")
+            temperature = None
+            try:
+                if temp is not None:
+                    temperature = float(temp)  # type: ignore[arg-type]
+            except Exception:
+                temperature = None
+            self.llm_service = LLMService.from_config(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                temperature=temperature,
+            )
+        except Exception as e:
+            self.app.notify(f"Failed to apply LLM config: {e}", severity="error")
+        # Update status label
+        self.app.run_worker(self._update_connectivity())
+
+    async def _update_connectivity(self) -> None:
+        """Ping current LLM endpoint and update status light and label."""
+        try:
+            ok, _models, err = await self.llm_service.ping()
+            # Gather overrides to determine display values
+            try:
+                overrides = {}
+                try:
+                    overrides = dict(self.app.get_llm_overrides())  # type: ignore[attr-defined]
+                except Exception:
+                    overrides = {}
+                model_name = overrides.get("model") or self.llm_service.model
+                base_url = overrides.get("base_url") or self.llm_service.base_url
+                alias = overrides.get("alias") if isinstance(overrides, dict) else None
+            except Exception:
+                model_name = self.llm_service.model
+                base_url = getattr(self.llm_service, "base_url", "")
+                alias = None
+
+            # Extract host from base_url for compact display
+            host = ""
+            try:
+                parsed = urlparse(str(base_url or ""))
+                host = parsed.hostname or (str(base_url) if base_url else "")
+            except Exception:
+                host = str(base_url or "")
+
+            # Build status with emojis: light + model + host (+ optional alias)
+            parts = [
+                ("🧠 " + str(model_name or "")).strip(),
+                ("🌐 " + str(host or "")).strip(),
+            ]
+            if alias:
+                try:
+                    a = str(alias).strip()
+                    if a:
+                        parts.append("🏷️ " + a)
+                except Exception:
+                    pass
+            text_core = " • ".join([p for p in parts if p and not p.endswith(" ")])
+
+            if ok:
+                self.conn_status.update(f"🟢 {text_core}")
+            else:
+                self.conn_status.update(f"🔴 {text_core} ({err})")
+        except Exception as e:
+            # Best-effort fallback text
+            try:
+                parsed = urlparse(getattr(self.llm_service, "base_url", ""))
+                host = parsed.hostname or getattr(self.llm_service, "base_url", "")
+            except Exception:
+                host = getattr(self.llm_service, "base_url", "")
+            self.conn_status.update(
+                f"🔴 🧠 {getattr(self.llm_service, 'model', '')} • 🌐 {host} ({e})"
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:  # type: ignore[override]
         # Handle chat send/new
@@ -505,6 +592,12 @@ class PktaiTUI(App):
             # Save overrides and notify
             self._llm_overrides = dict(result)
             self.notify("LLM settings saved.", severity="information")
+            # Apply to chat pane and refresh status
+            try:
+                chat = self.query_one("#chat", ChatPane)
+                chat.apply_llm_config(self._llm_overrides)
+            except Exception:
+                pass
 
     # File button removed; open with 'o' binding only
 
@@ -657,6 +750,8 @@ class PktaiTUI(App):
             return list(getattr(self, "_raw_packets", []) or [])
         except Exception:
             return []
+
+
 
 
 def main() -> None:
