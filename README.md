@@ -8,6 +8,8 @@ Meet pktai — a modern, Textual-powered TUI that blends Wireshark-like workflow
 
 Project URL: https://github.com/kspviswa/pktai
 
+[![Downloads](https://static.pepy.tech/badge/pktai)](https://pepy.tech/project/pktai) [![Downloads](https://static.pepy.tech/badge/pktai/month)](https://pepy.tech/project/pktai)
+
 ![](pktai_screen.png)
 
 ### Demo : https://www.youtube.com/watch?v=GnPRs-cBtQM 
