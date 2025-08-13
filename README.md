@@ -55,6 +55,7 @@ pktai
 ## Using pktai
 
 - **Browse packets**: Navigate the left pane; expand layers to inspect fields.
+- **Hex/ASCII viewer**: Click a field to view its raw bytes in the right pane.
 - **Chat analysis**: Ask questions in the right chat pane (e.g., “summarize traffic patterns”).
 - **Stop generation**: While the model is responding, click `Stop` to cancel.
 - **Display filter (slash command)**: Type:
