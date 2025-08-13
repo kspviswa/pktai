@@ -56,6 +56,8 @@ pktai
 
 - **Browse packets**: Navigate the left pane; expand layers to inspect fields.
 - **Hex/ASCII viewer**: Click a field to view its raw bytes in the right pane.
+- **Diverse Models**: Switch between different LLM models via the Settings modal.
+- **Local Models**: Run a local LLM with Ollama.
 - **Chat analysis**: Ask questions in the right chat pane (e.g., “summarize traffic patterns”).
 - **Stop generation**: While the model is responding, click `Stop` to cancel.
 - **Display filter (slash command)**: Type:
