@@ -239,3 +239,34 @@
 - Known provider: edit Base URL/API Key and Save to persist to YAML.
 - Custom provider: enter Alias, Base URL, and comma-separated Models; Save to create a new YAML entry (with alias conflict protection).
 - Reopen Settings or switch providers; saved API keys auto-populate.
+
+## Wireshark-like Data Viewer in Details Pane (2025-08-12)
+
+- Added a hex+ASCII Data Viewer beneath the packet details `Tree` that updates as you traverse fields, similar to Wireshark's data view.
+- Selection/highlight sync: selecting or highlighting a field in `#details` updates the viewer and applies a subtle highlight to the viewer body.
+- Parsing heuristics to derive bytes from detail lines:
+  - Hex sequences like `aa bb cc` or `aa:bb:cc`.
+  - `0x...` hex integers and decimal integers.
+  - Fallback to UTF-8 bytes of the value text when needed.
+- Safety/UX guards:
+  - Viewer starts empty on app launch and remains empty until a capture is loaded.
+  - Ignores updates when no capture is loaded and when the `Tree` root node is selected.
+
+### What Changed
+- `src/pktai_tui/ui/data_viewer.py`
+  - New `DataViewer` widget rendering a classic hexdump (16 bytes/row) with left offsets and ASCII.
+- `src/pktai_tui/ui/__init__.py`
+  - Exported `DataViewer`.
+- `src/pktai_tui/app.py`
+  - Imported and mounted `DataViewer` under `#details` in the left column.
+  - CSS layout updated: `PacketList { height: 3fr }`, `#details { height: 4fr }`, `#data_viewer { height: 1fr }`.
+  - Event wiring: update viewer on `Tree.NodeHighlighted` and `Tree.NodeSelected`.
+  - Clear viewer on mount and when packet selection changes; added `_has_capture_loaded()` helper to guard updates.
+
+### Usage
+- Open a capture (press `o`). Select a packet row; the details `Tree` populates.
+- Move selection within `#details`; the Data Viewer shows the selected field in hex + ASCII.
+
+### Notes / Follow-ups
+- Consider mapping exact byte ranges via pyshark-provided offsets for per-byte highlighting.
+- Add copy-to-clipboard for hex and a byte count/length header in the viewer.

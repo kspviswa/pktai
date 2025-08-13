@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from .models import PacketRow
 from .services.config import ensure_initialized as cfg_ensure_initialized
-from .ui import PacketList, SettingsScreen
+from .ui import PacketList, SettingsScreen, DataViewer
 from .services.capture import parse_capture, build_packet_view
 from .services.capture import packets_to_text
 from .services.filtering import filter_packets, nl_to_display_filter
@@ -519,8 +519,13 @@ class PktaiTUI(App):
     #left { width: 3fr; layout: vertical; }
     #chat { width: 1fr; layout: vertical; border: round $primary; overflow-x: hidden; }
 
-    PacketList { height: 1fr; overflow-y: auto; }
-    #details { height: 1fr; overflow-y: auto; }
+    PacketList { height: 3fr; overflow-y: auto; }
+    /* Details area split: Tree over DataViewer */
+    #details { height: 4fr; overflow-y: auto; }
+    #data_viewer { height: 1fr; border: round $secondary; overflow-x: hidden; overflow-y: auto; }
+    #dv_header { dock: top; padding: 0 1; content-align: left middle; }
+    #dv_body { padding: 1; text-wrap: wrap; }
+    #dv_body.highlight { background: $secondary 10%; }
 
     /* Chat pane layout */
     #chat_header { dock: top; padding: 1 1; content-align: center middle; }
@@ -563,6 +568,8 @@ class PktaiTUI(App):
                 tree = Tree("Packet details")
                 tree.id = "details"
                 yield tree
+                # Binary/ASCII data viewer beneath details
+                yield DataViewer(id="data_viewer")
             yield ChatPane(id="chat")
         yield Footer()
 
@@ -574,6 +581,12 @@ class PktaiTUI(App):
             pass
         self.packet_list = self.query_one(PacketList)
         self.details_tree = self.query_one("#details", Tree)
+        self.data_viewer = self.query_one("#data_viewer", DataViewer)
+        # Ensure DataViewer starts empty until a capture is loaded
+        try:
+            self.data_viewer.clear()
+        except Exception:
+            pass
         # Store raw pyshark packet objects to allow in-memory filtering
         self._raw_packets: list[object] = []
         # LLM overrides saved from Settings screen
@@ -688,6 +701,11 @@ class PktaiTUI(App):
     def _update_details_from_key(self, key: object) -> None:
         # Render details into the Tree widget with expandable per-layer sections
         self.details_tree.clear()
+        # Clear data viewer when the packet changes
+        try:
+            self.data_viewer.clear()
+        except Exception:
+            pass
         root = self.details_tree.root
         root.label = "Packet details"
         # Preferred layer based on protocol column
@@ -739,6 +757,97 @@ class PktaiTUI(App):
         if preferred_node is not None:
             self.details_tree.select_node(preferred_node)
 
+    # --------- Details Tree selection -> DataViewer update ---------
+    def _update_data_viewer_from_tree_node(self, node) -> None:
+        """Derive bytes from the selected Tree node text and update DataViewer.
+
+        Heuristics:
+        - If line contains hex bytes (e.g., "aa bb cc" or "aa:bb:cc"), parse them.
+        - If contains 0xNN.., parse as integer to bytes.
+        - Else, use the textual value's bytes (UTF-8) as a fallback.
+        """
+        # Do not update if no capture is loaded or if the root node is selected
+        if not self._has_capture_loaded():
+            return
+        try:
+            if node is self.details_tree.root:
+                return
+        except Exception:
+            pass
+        try:
+            label = str(getattr(node, "label", "") or "")
+        except Exception:
+            label = ""
+        title = label.strip() or "Field"
+
+        text = title
+
+        # Extract portion after colon for typical "  key: value" lines
+        try:
+            after_colon = text.split(":", 1)[1].strip()
+        except Exception:
+            after_colon = text
+
+        by: bytes | None = None
+
+        # Try hex sequence (bytes separated by space or colon)
+        import re
+        hex_seq = re.search(r"((?:[0-9a-fA-F]{2}[:\s])+[0-9a-fA-F]{2})", after_colon)
+        if hex_seq:
+            raw = hex_seq.group(1)
+            try:
+                cleaned = raw.replace(":", " ").split()
+                by = bytes(int(h, 16) for h in cleaned)
+            except Exception:
+                by = None
+
+        # Try single big hex value like 0x1A2B or plain hex string
+        if by is None:
+            m = re.search(r"0x([0-9a-fA-F]+)", after_colon)
+            if m:
+                try:
+                    val = int(m.group(1), 16)
+                    length = max(1, (val.bit_length() + 7) // 8)
+                    by = val.to_bytes(length, "big")
+                except Exception:
+                    by = None
+        if by is None:
+            m2 = re.search(r"\b([0-9a-fA-F]{4,})\b", after_colon)
+            if m2 and len(m2.group(1)) % 2 == 0:
+                try:
+                    by = bytes.fromhex(m2.group(1))
+                except Exception:
+                    by = None
+
+        # Try decimal integer
+        if by is None:
+            m3 = re.search(r"\b(\d+)\b", after_colon)
+            if m3:
+                try:
+                    val = int(m3.group(1))
+                    length = max(1, (val.bit_length() + 7) // 8)
+                    by = val.to_bytes(length, "big")
+                except Exception:
+                    by = None
+
+        # Fallback to UTF-8 encoding of the value text
+        if by is None:
+            try:
+                by = after_colon.encode("utf-8") if after_colon else text.encode("utf-8")
+            except Exception:
+                by = b""
+
+        try:
+            self.data_viewer.set_bytes(by or b"", title=title)
+        except Exception:
+            pass
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:  # type: ignore[override]
+        self._update_data_viewer_from_tree_node(event.node)
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:  # type: ignore[override]
+        self._update_data_viewer_from_tree_node(event.node)
+
     # Update on highlight and on explicit selection
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:  # type: ignore[override]
         self._update_details_from_key(event.row_key)
@@ -756,6 +865,19 @@ class PktaiTUI(App):
             return list(getattr(self, "_raw_packets", []) or [])
         except Exception:
             return []
+
+    # Internal helper
+    def _has_capture_loaded(self) -> bool:
+        try:
+            if not getattr(self, "_raw_packets", None):
+                return False
+            table = getattr(self.packet_list, "table", None)
+            if table is None:
+                return False
+            count = getattr(table, "row_count", 0)
+            return bool(count and count > 0)
+        except Exception:
+            return False
 
 
 
